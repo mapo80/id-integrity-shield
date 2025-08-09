@@ -1,0 +1,90 @@
+{
+  "threshold": 0.3,
+  "weights": {
+    "trufor": 0.35,
+    "noiseprintpp": 0.25,
+    "splicing": 0.1,
+    "noise_inconsistency": 0.1,
+    "jpeg_blockiness": 0.05,
+    "ela95": 0.05,
+    "jpeg_ghosts": 0.05,
+    "copy_move": 0.1,
+    "exif": 0.05,
+    "mantranet": 0.15
+  },
+  "thresholds": {
+    "trufor": 0.5,
+    "noiseprintpp": 0.5,
+    "splicing": 0.25,
+    "noise_inconsistency": 0.55,
+    "jpeg_blockiness": 0.6,
+    "ela95": 0.12,
+    "jpeg_ghosts": 0.08,
+    "copy_move": 0.25,
+    "exif": 0.2,
+    "mantranet": 0.35
+  },
+  "params": {
+    "trufor": {
+      "model_path": null,
+      "input_size": [
+        480,
+        480
+      ],
+      "score_top_percent": 1.0,
+      "reliability_weight": 0.5
+    },
+    "noiseprintpp": {
+      "model_path": null,
+      "input_size": null,
+      "score_top_percent": 5.0,
+      "block": 32
+    },
+    "splicing": {
+      "max_side": 1024
+    },
+    "noise_inconsistency": {
+      "block": 16,
+      "step": 8,
+      "blur_radius": 1.0,
+      "top_percent": 5.0
+    },
+    "jpeg_blockiness": {
+      "q": 8
+    },
+    "ela95": {
+      "quality": 95,
+      "scale": 10.0,
+      "top_percent": 5.0
+    },
+    "jpeg_ghosts": {
+      "qualities": [
+        75,
+        85,
+        95
+      ],
+      "top_percent": 5.0
+    },
+    "copy_move": {
+      "mode": "block",
+      "block": 16,
+      "step": 8,
+      "ham_tol": 6,
+      "min_offset": 12,
+      "max_pairs": 4000,
+      "min_cluster": 12,
+      "dilate": 2,
+      "top_percent": 2.0
+    },
+    "exif": {},
+    "mantranet": {
+      "model_path": null,
+      "input_size": [
+        512,
+        512
+      ],
+      "top_percent": 1.0,
+      "mock": false
+    }
+  }
+}
