@@ -1,5 +1,4 @@
 DEFAULT_WEIGHTS = {
-    "trufor": 0.35,
     "noiseprintpp": 0.25,
     "deep_onnx": 0.20,
     "splicing": 0.10,

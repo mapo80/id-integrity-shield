@@ -22,7 +22,7 @@ COPY models ./models
 # Python deps
 RUN pip install --no-cache-dir -r requirements.txt     && pip install --no-cache-dir fastapi uvicorn onnxruntime opencv-python-headless reportlab
 
-# Prepare models (TruFor, Noiseprint++, ManTraNet)
+# Prepare models (Noiseprint++, ManTraNet)
 # The script tries to download from the provided repos and assemble ONNX files.
 RUN bash models/prepare_models.sh || true
 

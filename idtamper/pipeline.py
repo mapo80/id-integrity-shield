@@ -8,7 +8,7 @@ import numpy as np
 
 from .aggregate import DEFAULT_WEIGHTS, fuse_scores
 from .visualize import save_heatmap_gray, fuse_heatmaps, overlay_on_image
-from .checks import ela, jpegghost, exif as exifcheck, noise, blockiness, copymove, splicing, trufor, noiseprintpp, mantranet
+from .checks import ela, jpegghost, exif as exifcheck, noise, blockiness, copymove, splicing, noiseprintpp, mantranet
 
 @dataclass
 class AnalyzerConfig:
@@ -40,7 +40,6 @@ def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
     # run checks (explicit names so params/thresholds match keys)
     results = []
     for name, fn in [
-                     ('trufor', trufor.run),
                      ('mantranet', mantranet.run),
                      ('noiseprintpp', noiseprintpp.run),
                      ('ela95', ela.run),
@@ -89,7 +88,7 @@ def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
 
     # --- Confidence computation (margin + overlap + agreement) ---
     import numpy as _np, math as _math
-    strong_checks = ['trufor','noiseprintpp','copy_move','splicing','noise_inconsistency']
+    strong_checks = ['noiseprintpp','copy_move','splicing','noise_inconsistency']
     mask_thr = float((cfg.check_params or {}).get('confidence_mask_thr', 0.6))
     tau = float((cfg.check_params or {}).get('confidence_tau', 0.10))
     alpha = float((cfg.check_params or {}).get('confidence_alpha', 0.30))

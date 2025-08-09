@@ -47,10 +47,10 @@ It comes with:
     │                         │                                             │
     │                         │                                             │
 ┌───▼───────────┐   ┌─────────▼───────────┐                         ┌───────▼────────┐
-│ TruFor ONNX   │   │ Copy-Move Detection │                         │ Report.json    │
-│ Noiseprint++  │   │ Splicing Detection  │                         │ Heatmaps/Overl.│
-│ ManTraNet ONNX│   │ Noise Inconsistency │                         │ Fused Heatmap  │
-└───────────────┘   │ ELA / JPEG Ghosts   │                         │ Logs           │
+│ Noiseprint++  │   │ Copy-Move Detection │                         │ Report.json    │
+│ ManTraNet ONNX│   │ Splicing Detection  │                         │ Heatmaps/Overl.│
+└───────────────┘   │ Noise Inconsistency │                         │ Fused Heatmap  │
+                    │ ELA / JPEG Ghosts   │                         │ Logs           │
                     │ JPEG Blockiness     │                         └────────────────┘
                     │ EXIF Consistency    │
                     └─────────────────────┘
@@ -62,7 +62,7 @@ It comes with:
 
 1. **Image ingestion** via CLI, API, or batch dataset scan.
 2. **Multi-check analysis**:
-   - Deep forensic ONNX models (TruFor, Noiseprint++, ManTraNet)
+   - Deep forensic ONNX models (Noiseprint++, ManTraNet)
    - Signal-based forensic checks (Copy-Move, Splicing, Noise, ELA, JPEG artifacts, EXIF)
 3. **Per-check scoring** → `score ∈ [0,1]`, optional heatmaps and details
 4. **Weighted fusion** → global `tamper_score`
@@ -81,7 +81,6 @@ It comes with:
 ## Checks Implemented
 
 ### Deep Forensics (ONNX, CPU)
-- **TruFor** – manipulation heatmap (ONNX from `mapo80/TruFor`)
 - **Noiseprint++** – camera noise inconsistency (ONNX)
 - **ManTraNet** – pixel-level manipulation map (ONNX from `mapo80/image-forgery-scanner`)
 
@@ -138,7 +137,7 @@ Each run directory contains:
 
 ```bash
 # Single image analysis
-python scripts/analyze.py input.jpg -o runs/item --profile recapture-id   --params '{"trufor":{"model_path":"/app/models_store/trufor_480x480_op13.onnx"}}'
+python scripts/analyze.py input.jpg -o runs/item --profile recapture-id   --params '{"noiseprintpp":{"model_path":"/app/models_store/noiseprintpp.onnx"}}'
 
 # Dataset scan
 python scripts/scan_dataset.py --input ./dataset --out runs/ds --profile recapture-id --save-artifacts

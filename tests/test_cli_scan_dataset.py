@@ -17,7 +17,6 @@ def main():
     mk(tam/'a.jpg','A'); mk(tam/'b.jpg','B'); mk(gen/'c.jpg','C')
 
     params = {
-      "trufor": {"mock": True, "input_size":[384,384]},
       "noiseprintpp": {"mock": True, "input_size":[256,256]}
     }
     params_path = root/'params.json'; params_path.write_text(json.dumps(params))

@@ -1,7 +1,6 @@
 {
   "threshold": 0.35,
   "weights": {
-    "trufor": 0.35,
     "noiseprintpp": 0.25,
     "splicing": 0.1,
     "noise_inconsistency": 0.1,
@@ -13,7 +12,6 @@
     "mantranet": 0.15
   },
   "thresholds": {
-    "trufor": 0.5,
     "noiseprintpp": 0.5,
     "splicing": 0.25,
     "noise_inconsistency": 0.55,
@@ -25,15 +23,6 @@
     "mantranet": 0.35
   },
   "params": {
-    "trufor": {
-      "model_path": null,
-      "input_size": [
-        480,
-        480
-      ],
-      "score_top_percent": 1.0,
-      "reliability_weight": 0.5
-    },
     "noiseprintpp": {
       "model_path": null,
       "input_size": null,

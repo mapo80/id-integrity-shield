@@ -12,11 +12,11 @@ def main():
 
     prof = load_profile('recapture-id')
     params = prof['params']
-    params['trufor'] = {**params['trufor'], 'mock': True, 'input_size':[384,384]}
     params['noiseprintpp'] = {**params['noiseprintpp'], 'mock': True, 'input_size':[512,512]}
     # Encourage flagging by lowering thresholds a bit
     thr = prof['thresholds']
-    thr['trufor'] = 0.3; thr['noiseprintpp'] = 0.3
+    thr['noiseprintpp'] = 0.3
+    thr['copy_move'] = -0.1
 
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=prof['threshold'], check_params=params, check_thresholds=thr)
     out = tmp/'out'; out.mkdir(parents=True, exist_ok=True)
@@ -24,7 +24,7 @@ def main():
 
     assert 'confidence' in rep and 0.0 <= rep['confidence'] <= 1.0
     # with two strong checks likely flagged, confidence should be reasonably high
-    if rep['per_check']['trufor']['flag'] and rep['per_check']['noiseprintpp']['flag']:
+    if rep['per_check']['copy_move']['flag'] and rep['per_check']['noiseprintpp']['flag']:
         assert rep['confidence'] >= 0.5, f"unexpectedly low confidence: {rep['confidence']}"
     return True
 

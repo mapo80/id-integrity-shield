@@ -25,8 +25,6 @@ def main():
     prof = load_profile("recapture-id")
     params = prof["params"]
     params["noiseprintpp"] = {**params["noiseprintpp"], "model_path": str(mp), "input_size": None, "score_top_percent": 5.0, "block": 32}
-    params["trufor"]["model_path"] = None
-    # deep_onnx removed
 
     cfg = AnalyzerConfig(weights=prof["weights"], threshold=prof["threshold"], check_params=params, check_thresholds=prof["thresholds"])
     rep = analyze_image(str(img), str(tmp/"out"), cfg)

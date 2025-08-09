@@ -22,9 +22,7 @@ def main():
     params = prof['params']
     params['mantranet'] = {**params['mantranet'], 'model_path': mp, 'input_size':[512,512]}
     # disable heavy checks for speed
-    params['trufor']['model_path'] = None
     params['noiseprintpp']['model_path'] = None
-    # deep_onnx removed
 
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=prof['threshold'], check_params=params, check_thresholds=prof['thresholds'])
     rep = analyze_image(str(img), str(tmp/'out'), cfg)
