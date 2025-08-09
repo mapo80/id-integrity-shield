@@ -10,7 +10,8 @@ def main():
     dr = ImageDraw.Draw(im)
     dr.rectangle([40,60,120,120], fill='black')  # source region
     # paste copy (simulate copy-move)
-    arr = np.asarray(im)
+    # np.asarray returns a read-only view; use np.array to get a writable copy
+    arr = np.array(im)
     patch = arr[60:120, 40:120].copy()
     arr[80:140, 170:250] = patch  # move to right side
     im2 = Image.fromarray(arr)

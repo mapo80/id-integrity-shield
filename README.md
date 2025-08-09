@@ -171,4 +171,5 @@ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-int
 PYTHONPATH=./idtamper python tests/run_coverage.py
 ```
 
-Coverage >80% with integrated runner.
+This command executes the full test suite and reports code coverage.
+The latest run yielded an overall coverage of **69.66%**.

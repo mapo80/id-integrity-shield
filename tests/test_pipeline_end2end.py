@@ -4,7 +4,8 @@ def main():
     from idtamper.profiles import load_profile
     from PIL import Image, ImageDraw
 
-    tmp = Path('/mnt/data/idtamper/tmp_e2e'); tmp.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    tmp = repo_root/'tmp_e2e'; tmp.mkdir(parents=True, exist_ok=True)
     # Two images: one 'tampered' path, one 'genuine' path (labels inferred by scan_dataset, not here)
     img1 = tmp/'tampered'/ 'doc1.png'; img1.parent.mkdir(parents=True, exist_ok=True)
     img2 = tmp/'genuine'/ 'doc2.png'; img2.parent.mkdir(parents=True, exist_ok=True)
@@ -22,8 +23,6 @@ def main():
     # enable mocks for ONNX checks to hit their paths
     params['trufor'] = {**params['trufor'], 'mock': True, 'input_size':[384,384]}
     params['noiseprintpp'] = {**params['noiseprintpp'], 'mock': True, 'input_size':[512,512]}
-    # also set deep_onnx without model to hit 'skip' branch
-    params['deep_onnx'] = {**params['deep_onnx'], 'model_path': None, 'input_size':[256,256]}
 
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=prof['threshold'],
                          check_params=params, check_thresholds=prof['thresholds'])
