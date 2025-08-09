@@ -9,7 +9,8 @@ def main():
     assert 'weights' in prof and 'params' in prof
 
     # load by path
-    ppath = Path('/mnt/data/idtamper/profiles/recapture-id.json')
+    repo_root = Path(__file__).resolve().parents[1]
+    ppath = repo_root/'profiles'/'recapture-id.json'
     prof2 = load_profile(str(ppath))
     assert prof2['threshold'] == prof['threshold']
 
@@ -18,7 +19,7 @@ def main():
     params = prof['params']
     params['trufor'] = {**params['trufor'], 'mock': True}
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=0.25, check_params=params, check_thresholds=prof['thresholds'])
-    out = Path('/mnt/data/idtamper/tmp_prof'); out.mkdir(parents=True, exist_ok=True)
+    out = repo_root/'tmp_prof'; out.mkdir(parents=True, exist_ok=True)
     test_img = out/'dummy.png'; im.save(test_img)
     rep = analyze_image(str(test_img), str(out/'o'), cfg)
     assert 'tamper_score' in rep and isinstance(rep['tamper_score'], float)

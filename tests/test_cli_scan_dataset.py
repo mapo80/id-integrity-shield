@@ -4,7 +4,8 @@ def main():
     from PIL import Image, ImageDraw
     import json, os
 
-    root = Path('/mnt/data/idtamper/tmp_dataset'); 
+    repo_root = Path(__file__).resolve().parents[1]
+    root = repo_root/'tmp_dataset'
     tam = root/'fake'; gen = root/'real'
     (tam).mkdir(parents=True, exist_ok=True); (gen).mkdir(parents=True, exist_ok=True)
 
@@ -21,11 +22,14 @@ def main():
     }
     params_path = root/'params.json'; params_path.write_text(json.dumps(params))
 
-    out = Path('/mnt/data/idtamper/runs/cli_cov'); 
+    out = repo_root/'runs'/'cli_cov'
     if out.exists():
         import shutil; shutil.rmtree(out)
-    cmd = [sys.executable, '/mnt/data/idtamper/scripts/scan_dataset.py', '--input', str(root), '--out', str(out), '--profile', 'recapture-id', '--params', str(params_path), '--save-artifacts']
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    script = repo_root/'scripts'/'scan_dataset.py'
+    cmd = [sys.executable, str(script), '--input', str(root), '--out', str(out), '--profile', 'recapture-id', '--params', str(params_path), '--save-artifacts']
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(repo_root)
+    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert res.returncode == 0, res.stderr
     assert (out/'dataset_report.csv').exists()
     assert (out/'summary.json').exists()

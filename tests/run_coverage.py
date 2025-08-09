@@ -16,7 +16,8 @@ def run():
     tracer = Trace(count=True, trace=False)
     for m in TESTS.glob('test_*.py'):
         code = compile(m.read_text(), str(m), 'exec')
-        tracer.runctx(code, {'__name__':'__main__'}, {})
+        globs = {'__name__': '__main__', '__file__': str(m)}
+        tracer.runctx(code, globs, {})
     res = tracer.results()
     counts = res.counts  # (filename, lineno) -> count
 

@@ -39,10 +39,10 @@ def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
 
     # run checks (explicit names so params/thresholds match keys)
     results = []
-    for name, fn in [('trufor', trufor.run),
+    for name, fn in [
+                     ('trufor', trufor.run),
                      ('mantranet', mantranet.run),
                      ('noiseprintpp', noiseprintpp.run),
-                     ('deep_onnx'.run),
                      ('ela95', ela.run),
                      ('jpeg_ghosts', jpegghost.run),
                      ('noise_inconsistency', noise.run),

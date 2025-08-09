@@ -6,7 +6,9 @@ def main():
     data = [os.urandom(1024) for _ in parts]
     for p,d in zip(parts, data): p.write_bytes(d)
     out = tmp/'model.onnx'
-    res = subprocess.run([sys.executable, '/mnt/data/idtamper/scripts/join_parts.py','--out', str(out), '--parts', *[str(p) for p in parts]], capture_output=True, text=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root/'scripts'/'join_parts.py'
+    res = subprocess.run([sys.executable, str(script), '--out', str(out), '--parts', *[str(p) for p in parts]], capture_output=True, text=True)
     assert res.returncode==0, res.stderr
     assert out.read_bytes() == b''.join(data)
     print('OK join', out.stat().st_size)
