@@ -21,7 +21,6 @@ def main():
     prof = load_profile('recapture-id')
     params = prof['params']
     # enable mocks for ONNX checks to hit their paths
-    params['trufor'] = {**params['trufor'], 'mock': True, 'input_size':[384,384]}
     params['noiseprintpp'] = {**params['noiseprintpp'], 'mock': True, 'input_size':[512,512]}
 
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=prof['threshold'],

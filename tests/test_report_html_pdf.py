@@ -14,7 +14,6 @@ def main():
     prof = load_profile('recapture-id')
     params = prof['params']
     # Use mocks for ONNX to speed up
-    params['trufor'] = {**params['trufor'], 'mock': True, 'input_size':[384,384]}
     params['noiseprintpp'] = {**params['noiseprintpp'], 'mock': True, 'input_size':[256,256]}
     cfg = AnalyzerConfig(weights=prof['weights'], threshold=prof['threshold'], check_params=params, check_thresholds=prof['thresholds'])
 
