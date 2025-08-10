@@ -5,11 +5,12 @@ def main():
         print("SKIP ORB test: OpenCV not available:", e)
         return True
     from PIL import Image, ImageDraw
+    import numpy as np
     from idtamper.checks import copymove
     im = Image.new('RGB', (320, 220), 'white')
     dr = ImageDraw.Draw(im)
     dr.rectangle([40,60,120,120], fill='black')
-    arr = np.asarray(im)
+    arr = np.asarray(im).copy()
     patch = arr[60:120, 40:120].copy()
     arr[82:142, 172:252] = patch
     im2 = Image.fromarray(arr)

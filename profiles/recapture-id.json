@@ -69,8 +69,8 @@
     "mantranet": {
       "model_path": null,
       "input_size": [
-        512,
-        512
+        256,
+        256
       ],
       "top_percent": 1.0,
       "mock": false
