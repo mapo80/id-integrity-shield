@@ -1,14 +1,29 @@
 
-import json, os
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional
-from PIL import Image
+from typing import Any, Dict, Optional
+
 import numpy as np
+from PIL import Image
 
 from .aggregate import DEFAULT_WEIGHTS, fuse_scores
-from .visualize import save_heatmap_gray, fuse_heatmaps, overlay_on_image
-from .checks import ela, jpegghost, exif as exifcheck, noise, blockiness, copymove, splicing, noiseprintpp, mantranet
+from .checks import (
+    blockiness,
+    copymove,
+    ela,
+    exif as exifcheck,
+    jpegghost,
+    mantranet,
+    noise,
+    noiseprintpp,
+    splicing,
+)
+from .execution import ParallelConfig
+from .metrics import measure
+from .preproc import PreprocOptions, build_preproc_cache
+from .visualize import fuse_heatmaps, overlay_on_image, save_heatmap_gray
 
 @dataclass
 class AnalyzerConfig:
@@ -17,9 +32,9 @@ class AnalyzerConfig:
     check_params: Optional[Dict[str,Any]] = None
     check_thresholds: Optional[Dict[str,float]] = None
 
-def _run_check(fn, name, pil_img, params):
+def _run_check(fn, name, inp, params):
     try:
-        res = fn(pil_img, params=params.get(name) if params else None)
+        res = fn(inp, params=params.get(name) if params else None)
         score = res.get("score", None)
         hm = res.get("map", None)
         meta = res.get("meta", {})
@@ -27,29 +42,45 @@ def _run_check(fn, name, pil_img, params):
     except Exception as e:
         return {"name": name, "score": None, "map": None, "meta": {"error": str(e)}}
 
-def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
-    outp = Path(out_dir); outp.mkdir(parents=True, exist_ok=True)
+def analyze_image(
+    image_path: str,
+    out_dir: str,
+    cfg: AnalyzerConfig,
+    parallel: ParallelConfig = ParallelConfig(),
+):
+    outp = Path(out_dir)
+    outp.mkdir(parents=True, exist_ok=True)
     pil_img = Image.open(image_path).convert("RGB")
-    # save a copy of original for reports
+
     try:
         import shutil
-        shutil.copy2(image_path, str(outp/Path(image_path).name))
+
+        shutil.copy2(image_path, str(outp / Path(image_path).name))
     except Exception:
         pass
 
-    # run checks (explicit names so params/thresholds match keys)
+    cache = build_preproc_cache(np.asarray(pil_img), PreprocOptions())
+
     results = []
-    for name, fn in [
-                     ('mantranet', mantranet.run),
-                     ('noiseprintpp', noiseprintpp.run),
-                     ('ela95', ela.run),
-                     ('jpeg_ghosts', jpegghost.run),
-                     ('noise_inconsistency', noise.run),
-                     ('splicing', splicing.run),
-                     ('copy_move', copymove.run),
-                     ('jpeg_blockiness', blockiness.run),
-                     ('exif', exifcheck.run)]:
-        results.append(_run_check(fn, name, pil_img, cfg.check_params or {}))
+    metrics = []
+    checks = [
+        ("mantranet", mantranet.run, pil_img),
+        ("noiseprintpp", noiseprintpp.run, pil_img),
+        ("ela95", ela.run, cache),
+        ("jpeg_ghosts", jpegghost.run, cache),
+        ("noise_inconsistency", noise.run, cache),
+        ("splicing", splicing.run, cache),
+        ("copy_move", copymove.run, cache),
+        ("jpeg_blockiness", blockiness.run, cache),
+        ("exif", exifcheck.run, pil_img),
+    ]
+    for name, fn, inp in checks:
+        def call(fn=fn, name=name, inp=inp):
+            return _run_check(fn, name, inp, cfg.check_params or {})
+
+        res, metr = measure(lambda: call(), name)
+        results.append(res)
+        metrics.append(metr)
 
     # per_check dict with thresholds
     per_check = {}
@@ -131,6 +162,18 @@ def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
     confidence = sig * (1.0 + alpha * overlap_ratio) * (1.0 + beta * (checks_forti_flag / max(1, nstrong)))
     confidence = float(max(0.0, min(1.0, confidence)))
 
+    import psutil
+
+    metrics_section = {
+        "total_ms": sum(m.ms for m in metrics),
+        "checks": [m.__dict__ for m in metrics],
+        "parallel_config": parallel.__dict__,
+        "hw": {
+            "cpu_count": psutil.cpu_count(),
+            "ram_gb": psutil.virtual_memory().total / 1e9,
+        },
+    }
+
     report = {
         "image": os.path.basename(image_path),
         "tamper_score": tamper_score,
@@ -148,7 +191,8 @@ def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
             "mask_thr": mask_thr
         },
         "per_check": per_check,
-        "artifacts": artifacts
+        "artifacts": artifacts,
+        "metrics": metrics_section,
     }
     (outp/"report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
