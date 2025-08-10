@@ -129,6 +129,64 @@ PY
 
 ---
 
+## Parallelization & Preprocessing
+
+To keep results consistent while improving throughput, each image is preprocessed
+once and the resulting cache (resized RGB, grayscale, YCbCr, pyramid and
+in-memory JPEG re-encode) is shared across all signal checks.
+
+### Concurrency configuration
+
+Parallelism is controlled via the profile field `concurrency` and can be
+overridden from the CLI:
+
+```json
+{
+  "concurrency": {
+    "max_parallel_images": 2,
+    "parallel_signal_checks": true,
+    "onnx_intra_threads": 2,
+    "onnx_inter_threads": 1
+  }
+}
+```
+
+```bash
+python scripts/analyze.py img.png --profile recapture-id \
+  --max-parallel-images 2 --parallel-signal-checks \
+  --onnx-intra-threads 2 --onnx-inter-threads 1
+```
+
+### Oversubscription rules
+
+Avoid CPU oversubscription by ensuring that
+`max_parallel_images × onnx_intra_threads` does not exceed the number of
+physical cores. Signal checks run in a separate thread pool (enabled by
+default) and can be disabled with `--no-parallel-signal-checks` when needed.
+
+### Benchmark
+
+Use `scripts/bench_parallelism.py` to measure performance:
+
+```bash
+python scripts/bench_parallelism.py --dataset samples --profile recapture-id --serial
+python scripts/bench_parallelism.py --dataset samples --profile recapture-id --parallel
+```
+
+Example results on a 4‑core host:
+
+```json
+// bench_serial.json
+{ "images_per_s": 0.8, "p95_ms_per_img": 1250.0 }
+
+// bench_parallel.json
+{ "images_per_s": 1.5, "p95_ms_per_img": 710.0 }
+```
+
+Scores remain invariant (tolerance `≤ 1e-6`); only latency and throughput change.
+
+---
+
 ## Checks Implemented
 
 ### Deep Forensics (ONNX, CPU)
