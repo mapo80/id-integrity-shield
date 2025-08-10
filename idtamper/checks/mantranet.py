@@ -26,8 +26,15 @@ def run(pil_image, params=None):
             sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
             im = pil_image.convert('RGB').resize((Wt, Ht))
             arr = (np.asarray(im).astype('float32')/255.0)
-            x = np.transpose(arr, (2,0,1))[None, ...]  # NCHW
-            feeds = {sess.get_inputs()[0].name: x}
+            inp = sess.get_inputs()[0]
+            shape = inp.shape
+            channels_first = len(shape) >= 4 and shape[1] == 3
+            if channels_first:
+                x = np.transpose(arr, (2,0,1))[None, ...]  # NCHW
+            else:
+                # default to channels-last (NHWC)
+                x = arr[None, ...]
+            feeds = {inp.name: x}
             outs = sess.run(None, feeds)
             y = outs[0]
             # Accept common cases: (N,1,h,w) | (N,h,w,1) | (N,h,w) | (1,h,w) | (h,w)

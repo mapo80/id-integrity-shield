@@ -20,7 +20,7 @@ def main():
     img = tmp/'img.png'; Image.fromarray((np.random.rand(512,512,3)*255).astype('uint8')).save(img)
     prof = load_profile('recapture-id')
     params = prof['params']
-    params['mantranet'] = {**params['mantranet'], 'model_path': mp, 'input_size':[512,512]}
+    params['mantranet'] = {**params['mantranet'], 'model_path': mp, 'input_size':[256,256]}
     # disable heavy checks for speed
     params['noiseprintpp']['model_path'] = None
 
