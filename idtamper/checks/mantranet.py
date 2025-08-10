@@ -1,6 +1,8 @@
 
 import numpy as np
 
+from ..execution import ParallelConfig, init_onnx_session_opts
+
 def run(pil_image, params=None):
     """ManTraNet ONNX check (CPU). 
     - If 'model_path' provided and onnxruntime available -> run model.
@@ -23,9 +25,18 @@ def run(pil_image, params=None):
     if session is None and model_path:
         try:
             import onnxruntime as ort
-            session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+
+            so = init_onnx_session_opts(ParallelConfig())
+            session = ort.InferenceSession(
+                model_path, sess_options=so, providers=["CPUExecutionProvider"]
+            )
         except Exception as e:
-            return {"name":"mantranet","score":None,"map":None,"meta":{"reason":str(e)}}
+            return {
+                "name": "mantranet",
+                "score": None,
+                "map": None,
+                "meta": {"reason": str(e)},
+            }
 
     if session is not None:
         try:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..preproc import PreprocCache
-
 
 def _dh(b, ham_tol=4):
     """Compute 64-bit dHash for a tiny grayscale block (9x8)."""
@@ -42,8 +40,9 @@ def run(img_or_cache, params=None):
     mode = p.get("mode", "block")
     top_percent = float(p.get("top_percent", 2.0))
 
-    if isinstance(img_or_cache, PreprocCache):
-        arr = img_or_cache.gray.astype(np.float32) / 255.0
+    gray = getattr(img_or_cache, "gray", None)
+    if gray is not None:
+        arr = gray.astype(np.float32) / 255.0
     else:
         arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32) / 255.0
 

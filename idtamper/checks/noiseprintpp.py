@@ -1,6 +1,8 @@
 import numpy as np
 from PIL import Image
 
+from ..execution import ParallelConfig, init_onnx_session_opts
+
 def _mock_forward(H, W, seed=0):
     rng = np.random.RandomState(seed)
     base = rng.randn(H, W).astype(np.float32) * 0.1
@@ -17,16 +19,30 @@ def run(pil_image, params=None):
         Ht, Wt = p.get('input_size', [512, 512])
         resid = _mock_forward(Ht, Wt, seed=321)
     else:
-        sess = p.get('session')
-        mp = p.get('model_path', None)
+        sess = p.get("session")
+        mp = p.get("model_path", None)
         if sess is None:
             if not mp:
-                return {"name": "noiseprintpp", "score": None, "map": None, "meta": {"reason": "model_path not provided"}}
+                return {
+                    "name": "noiseprintpp",
+                    "score": None,
+                    "map": None,
+                    "meta": {"reason": "model_path not provided"},
+                }
             try:
                 import onnxruntime as ort
-                sess = ort.InferenceSession(str(mp), providers=['CPUExecutionProvider'])
+
+                so = init_onnx_session_opts(ParallelConfig())
+                sess = ort.InferenceSession(
+                    str(mp), sess_options=so, providers=["CPUExecutionProvider"]
+                )
             except Exception as e:
-                return {"name": "noiseprintpp", "score": None, "map": None, "meta": {"reason": f"onnxruntime/model error: {e}"}}
+                return {
+                    "name": "noiseprintpp",
+                    "score": None,
+                    "map": None,
+                    "meta": {"reason": f"onnxruntime/model error: {e}"},
+                }
         in_name = sess.get_inputs()[0].name
         out_name = sess.get_outputs()[0].name
         arr = np.asarray(pil_image.convert('RGB'))

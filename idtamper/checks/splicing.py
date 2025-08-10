@@ -5,9 +5,6 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image, ImageFilter
 
-from ..preproc import PreprocCache
-
-
 def _gradients(arr):
     gy = np.abs(np.diff(arr, axis=0, prepend=arr[:1, :]))
     gx = np.abs(np.diff(arr, axis=1, prepend=arr[:, :1]))
@@ -49,7 +46,7 @@ def run(img_or_cache, params=None):
     scales = p.get("scales", [1.0, 2.0, 4.0])
     win = int(p.get("win", 7))
 
-    if isinstance(img_or_cache, PreprocCache):
+    if hasattr(img_or_cache, "img") and hasattr(img_or_cache, "ycbcr"):
         im = Image.fromarray(img_or_cache.img)
         arr = img_or_cache.ycbcr.astype(np.float32)
     else:

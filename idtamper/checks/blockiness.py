@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..preproc import PreprocCache
-
-
 def run(img_or_cache, params=None):
     """Run the blockiness check.
 
     Parameters
     ----------
     img_or_cache:
-        Either a PIL image or :class:`PreprocCache` instance.
+        Either a PIL image or an object with ``gray`` attribute.
     params:
         Optional parameters dictionary. Supported key ``q`` for block size.
     """
@@ -21,8 +18,9 @@ def run(img_or_cache, params=None):
     p = params or {}
     q = int(p.get("q", 8))
 
-    if isinstance(img_or_cache, PreprocCache):
-        arr = img_or_cache.gray.astype(np.float32)
+    gray = getattr(img_or_cache, "gray", None)
+    if gray is not None:
+        arr = gray.astype(np.float32)
     else:
         arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32)
 

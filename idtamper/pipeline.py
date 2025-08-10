@@ -269,9 +269,49 @@ def analyze_images(image_paths: List[str], out_dir: str, cfg: AnalyzerConfig, pa
         return [f.result() for f in futures]
 
 
-def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig, parallel: ParallelConfig = ParallelConfig()):
-    # For backward compatibility we store artifacts directly in ``out_dir``.
+def _analyze_image_cfg(
+    image_path: str,
+    out_dir: str,
+    cfg: AnalyzerConfig,
+    parallel: ParallelConfig = ParallelConfig(),
+):
+    """Analyze a single image using an :class:`AnalyzerConfig`.
+
+    This is the original configuration-based entry point.  It is kept
+    for backwards compatibility and is used by the dispatcher
+    :func:`analyze_image` when a profile is not provided.
+    """
+
     if parallel.max_parallel_images <= 1:
         return _analyze_single(image_path, out_dir, cfg, parallel, _ORT_SESS)
-    # if parallelism requested, fall back to batch API
     return analyze_images([image_path], out_dir, cfg, parallel)[0]
+
+
+def analyze_image(*args, **kwargs):
+    """Dispatch to either profile-based or config-based analysis."""
+
+    if "profile" in kwargs:
+        image_path = kwargs.get("image_path") or (args[0] if args else None)
+        profile = kwargs["profile"]
+        params = kwargs.get("params") or {}
+        parallel_config = kwargs.get("parallel_config")
+        out_dir = kwargs.get("out_dir", "out")
+
+        from .profiles import load_profile
+
+        prof = load_profile(profile)
+        cfg = AnalyzerConfig(
+            weights=prof.get("weights"),
+            threshold=float(prof.get("threshold", 0.3)),
+            check_params={**(prof.get("params") or {}), **params},
+            check_thresholds=prof.get("thresholds"),
+        )
+
+        if parallel_config is not None:
+            pcfg = parallel_config
+        else:
+            pcfg = ParallelConfig(**prof.get("concurrency", {}))
+
+        return _analyze_image_cfg(image_path, out_dir, cfg, pcfg)
+
+    return _analyze_image_cfg(*args, **kwargs)
