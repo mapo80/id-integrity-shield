@@ -11,7 +11,7 @@ It comes with:
 - **Heatmaps** and overlays for localization
 - **CLI** and **FastAPI REST API** with API key protection
 - **Dockerfile** for CPU-only deployments
-- **Extensive test suite** with >90% coverage
+- **Extensive test suite** with 92% coverage
 
 ---
 
@@ -221,6 +221,8 @@ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-int
 pytest -q --maxfail=1 --disable-warnings \
   --cov=idtamper --cov=app --cov-report=term-missing --cov-report=html
 ```
+
+Current coverage: 92%
 
 This command runs all tests and generates an HTML report under `htmlcov/`.
 
