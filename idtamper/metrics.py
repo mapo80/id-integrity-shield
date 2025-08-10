@@ -70,10 +70,15 @@ def describe_runtime(cfg) -> Dict[str, Any]:
     }
 
 
-def embed_report_metrics(report: Dict[str, Any], total_ms: float, checks: Iterable[CheckMetrics], runtime: Dict[str, Any]):
+def embed_report_metrics(
+    report: Dict[str, Any],
+    total_ms: float,
+    checks: Iterable[CheckMetrics],
+    runtime: Dict[str, Any],
+):
     report["metrics"] = {
         "total_ms": total_ms,
         "checks": [c.__dict__ for c in checks],
     }
-    report["metrics"].update(runtime)
+    report["runtime"] = runtime
     return report

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..preproc import PreprocCache
-
 
 def _haar2d(x):
     H, W = x.shape
@@ -41,19 +39,17 @@ def run(img_or_cache, params=None):
     step = int(p.get("step", 16))
     top_percent = float(p.get("top_percent", 5.0))
 
-    if isinstance(img_or_cache, PreprocCache):
-        arr = img_or_cache.gray.astype(np.float32) / 255.0
+    gray = getattr(img_or_cache, "gray", None)
+    if gray is not None:
+        arr = gray.astype(np.float32) / 255.0
     else:
         arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32) / 255.0
 
     if method == "blur":
-        from PIL import ImageFilter
+        from PIL import Image, ImageFilter
 
         blur = float(p.get("blur_radius", 1.0))
-        if isinstance(img_or_cache, PreprocCache):
-            pil = Image.fromarray(img_or_cache.img)
-        else:
-            pil = img_or_cache
+        pil = Image.fromarray(img_or_cache.img) if hasattr(img_or_cache, "img") else img_or_cache
         arr_blur = np.asarray(
             pil.convert("L").filter(ImageFilter.GaussianBlur(radius=blur)),
             dtype=np.float32,

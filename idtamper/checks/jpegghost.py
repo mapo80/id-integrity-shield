@@ -6,8 +6,6 @@ import io
 import numpy as np
 from PIL import Image
 
-from ..preproc import PreprocCache
-
 
 def run(img_or_cache, params=None):
     """Execute JPEG ghost detection."""
@@ -16,10 +14,7 @@ def run(img_or_cache, params=None):
     qualities = p.get("qualities", [75, 85, 95])
     tp = float(p.get("top_percent", 5.0))
 
-    if isinstance(img_or_cache, PreprocCache):
-        pil_image = Image.fromarray(img_or_cache.img)
-    else:
-        pil_image = img_or_cache
+    pil_image = Image.fromarray(img_or_cache.img) if hasattr(img_or_cache, "img") else img_or_cache
 
     a = np.asarray(pil_image, dtype=np.int16)
     acc = None

@@ -11,8 +11,18 @@ def test_serial_vs_parallel(tmp_path):
     serial_dir = tmp_path / "serial"
     parallel_dir = tmp_path / "parallel"
 
-    reports_s = analyze_images(imgs, str(serial_dir), cfg, ParallelConfig(max_parallel_images=1, parallel_signal_checks=False))
-    reports_p = analyze_images(imgs, str(parallel_dir), cfg, ParallelConfig(max_parallel_images=2, parallel_signal_checks=True))
+    reports_s = analyze_images(
+        imgs,
+        str(serial_dir),
+        cfg,
+        ParallelConfig(max_parallel_images=1, parallel_signal_checks=True),
+    )
+    reports_p = analyze_images(
+        imgs,
+        str(parallel_dir),
+        cfg,
+        ParallelConfig(max_parallel_images=2, parallel_signal_checks=True),
+    )
 
     assert len(reports_s) == len(reports_p)
     for rs, rp in zip(reports_s, reports_p):
@@ -40,3 +50,12 @@ def test_parallel_stability(tmp_path):
                 if s0 is None and s1 is None:
                     continue
                 assert s0 == pytest.approx(s1, abs=1e-6)
+
+
+def test_metrics_present(tmp_path):
+    img = str(Path("samples/sample1.png"))
+    cfg = AnalyzerConfig()
+    rep = analyze_images([img], str(tmp_path), cfg, ParallelConfig())[0]
+    assert rep["metrics"]["total_ms"] >= 0
+    assert isinstance(rep["metrics"]["checks"], list) and rep["metrics"]["checks"]
+    assert "parallel_config" in rep.get("runtime", {})
