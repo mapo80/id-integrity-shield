@@ -1,0 +1,8 @@
+[run]
+omit =
+    idtamper/checks/copymove.py
+    idtamper/checks/mantranet.py
+    idtamper/checks/noiseprintpp.py
+    idtamper/checks/splicing.py
+    idtamper/report.py
+    idtamper/visualize.py

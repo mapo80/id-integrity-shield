@@ -1,28 +1,93 @@
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
-import os, shutil, uuid, json
+import os, shutil, uuid, json, logging, time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from prometheus_fastapi_instrumentator import Instrumentator
 from idtamper.pipeline import analyze_image, AnalyzerConfig
 from idtamper.profiles import load_profile
 
 API_KEY_NAME = "x-api-key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
+
 def get_api_key(api_key: str = Depends(api_key_header)):
     expected = os.environ.get("API_KEY")
     if not expected:
         # if not set, disable auth for dev
         return None
+    if api_key is None:
+        raise HTTPException(status_code=401, detail="Missing API key")
     if api_key != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+        raise HTTPException(status_code=403, detail="Forbidden")
     return api_key
 
-app = FastAPI(title="IDTamper API", version="1.0.0")
+
+app = FastAPI(
+    title="ID Integrity Shield",
+    version=os.getenv("APP_VERSION", "0.1.0"),
+    description="API for document tamper checks (recapture, reprint, splice...).",
+    contact={"name": "Maintainers", "url": "https://github.com/mapo80/id-integrity-shield"},
+)
+
+
+logger = logging.getLogger("idshield")
+handler = logging.StreamHandler()
+handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s %(levelname)s path=%(path)s method=%(method)s status=%(status)s duration_ms=%(duration_ms)s msg=%(message)s"
+    )
+)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    dur = (time.time() - start) * 1000
+    logger.info(
+        "request",
+        extra={
+            "path": request.url.path,
+            "method": request.method,
+            "status": response.status_code,
+            "duration_ms": round(dur, 2),
+        },
+    )
+    return response
+
+
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/version")
+def version():
+    return {
+        "version": os.getenv("APP_VERSION", "0.1.0"),
+        "git": os.getenv("GIT_SHA", "unknown"),
+    }
+
+
+@app.post("/analyze")
+async def analyze_stub(file: UploadFile = File(...)):
+    return {"result": "ok"}
+
+
+@app.get("/protected")
+def protected(_api_key: str = Depends(get_api_key)):
+    return {"ok": True}
 
 class AnalyzeResponse(BaseModel):
     image: str
@@ -76,7 +141,7 @@ def health():
 
 # simple endpoint to download an artifact if needed
 @app.get("/v1/artifact")
-def artifact(path: str, _api_key: str = Depends(get_api_key)):
+def artifact(path: str, _api_key: str = Depends(get_api_key)) -> FileResponse:
     p = Path(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail="Not found")

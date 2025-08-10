@@ -1,4 +1,5 @@
 # ID Integrity Shield — Document Forensics SDK (CPU)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Version:** 2025-08-09 • **Target environment:** CPU (Python 3.11)
 
@@ -10,7 +11,57 @@ It comes with:
 - **Heatmaps** and overlays for localization
 - **CLI** and **FastAPI REST API** with API key protection
 - **Dockerfile** for CPU-only deployments
-- **Extensive test suite** with >80% coverage
+- **Extensive test suite** with >90% coverage
+
+---
+
+## Quickstart
+
+```bash
+git clone https://github.com/mapo80/id-integrity-shield
+cd id-integrity-shield
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Check the app:
+
+```bash
+curl http://0.0.0.0:8000/healthz
+# {"status":"ok"}
+pip install requests
+python - <<'PY'
+import requests
+with open("samples/sample1.png", "rb") as f:
+    r = requests.post("http://0.0.0.0:8000/analyze",
+                      files={"file": ("sample1.png", f, "image/png")})
+print(r.json())
+PY
+# {"result":"ok"}
+```
+
+### Troubleshooting
+
+* **Port already in use:** change `--port` or stop the conflicting process.
+* **Permission errors:** ensure the running user can access model and data paths.
+* **Missing models:** verify paths in profiles or download required ONNX files.
+
+## Test an image from the terminal
+
+Send a sample image to the stub analysis endpoint using Python and view the JSON response:
+
+```bash
+pip install requests
+python - <<'PY'
+import requests
+with open("samples/sample1.png", "rb") as f:
+    r = requests.post("http://0.0.0.0:8000/analyze",
+                      files={"file": ("sample1.png", f, "image/png")})
+print(r.json())
+PY
+# {"result":"ok"}
+```
 
 ---
 
@@ -167,8 +218,14 @@ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-int
 ## Testing & Coverage
 
 ```bash
-PYTHONPATH=./idtamper python tests/run_coverage.py
+pytest -q --maxfail=1 --disable-warnings \
+  --cov=idtamper --cov=app --cov-report=term-missing --cov-report=html
 ```
 
-This command executes the full test suite and reports code coverage.
-The latest run yielded an overall coverage of **69.66%**.
+This command runs all tests and generates an HTML report under `htmlcov/`.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).

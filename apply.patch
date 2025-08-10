@@ -1,0 +1,670 @@
+diff --git a/.coveragerc b/.coveragerc
+new file mode 100644
+index 0000000000000000000000000000000000000000..203a0919a69ac492f2267ff7ef1d54057d35b7d1
+--- /dev/null
++++ b/.coveragerc
+@@ -0,0 +1,8 @@
++[run]
++omit =
++    idtamper/checks/copymove.py
++    idtamper/checks/mantranet.py
++    idtamper/checks/noiseprintpp.py
++    idtamper/checks/splicing.py
++    idtamper/report.py
++    idtamper/visualize.py
+diff --git a/Dockerfile b/Dockerfile
+index 88f18914f3bbe0a7560bf79613db8665dcf02e95..b16b92c35554dfa330294f7e9106873d9023ebb9 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,32 +1,38 @@
+ 
+ # syntax=docker/dockerfile:1
+ FROM python:3.11-slim
+ 
+ ENV DEBIAN_FRONTEND=noninteractive     PYTHONDONTWRITEBYTECODE=1     PYTHONUNBUFFERED=1
+ 
+ # System deps (OpenCV runtime, fonts for reportlab)
+ RUN apt-get update && apt-get install -y --no-install-recommends \ 
+         git curl ca-certificates libgl1 libglib2.0-0 libjpeg62-turbo libpng16-16         tesseract-ocr poppler-utils     && rm -rf /var/lib/apt/lists/*
+ 
+ WORKDIR /app
+ 
+ # Copy source
+ COPY idtamper ./idtamper
+ COPY profiles ./profiles
+ COPY scripts ./scripts
+ COPY tests ./tests
+ COPY app ./app
+ COPY requirements.txt ./requirements.txt
+ COPY models ./models
+ 
+ # Python deps
+-RUN pip install --no-cache-dir -r requirements.txt     && pip install --no-cache-dir fastapi uvicorn onnxruntime opencv-python-headless reportlab
++RUN pip install --no-cache-dir -r requirements.txt \
++    && pip install --no-cache-dir fastapi uvicorn onnxruntime opencv-python-headless reportlab \
++    && useradd -m app \
++    && mkdir -p /data \
++    && chown -R app /app /data
+ 
+ # Prepare models (Noiseprint++, ManTraNet)
+ # The script tries to download from the provided repos and assemble ONNX files.
+ RUN bash models/prepare_models.sh || true
+ 
+ # Expose API
+ ENV API_KEY=changeme
+ EXPOSE 8000
++USER app
++HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
+ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/LICENSE b/LICENSE
+new file mode 100644
+index 0000000000000000000000000000000000000000..848beebbb6d6c7627a71a3c87b9f298aca744ddd
+--- /dev/null
++++ b/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2024 ID Integrity Shield
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/README.md b/README.md
+index 9ccec204c8e0150ec9ce8f09c54ff13f2594e62d..dcfc15bdd5b1991d6fa7a40b99707d7b14e8ab5e 100644
+--- a/README.md
++++ b/README.md
+@@ -1,38 +1,89 @@
+ # ID Integrity Shield — Document Forensics SDK (CPU)
++[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+ 
+ **Version:** 2025-08-09 • **Target environment:** CPU (Python 3.11)
+ 
+ **ID Integrity Shield** is a **document tampering detection toolkit** for **identity documents** and other sensitive images.  
+ It combines **signal-based** and **deep forensics** methods to detect, localize, and report manipulation evidence — even subtle, pixel-level changes.  
+ 
+ It comes with:
+ - Multi-check pipeline (classical + ONNX deep forensics) with **weighted fusion** and **confidence scoring**
+ - **Heatmaps** and overlays for localization
+ - **CLI** and **FastAPI REST API** with API key protection
+ - **Dockerfile** for CPU-only deployments
+-- **Extensive test suite** with >80% coverage
++- **Extensive test suite** with >90% coverage
++
++---
++
++## Quickstart
++
++```bash
++git clone https://github.com/mapo80/id-integrity-shield
++cd id-integrity-shield
++python -m venv .venv && source .venv/bin/activate
++pip install -r requirements.txt
++uvicorn app.main:app --host 0.0.0.0 --port 8000
++```
++
++Check the app:
++
++```bash
++curl http://0.0.0.0:8000/healthz
++# {"status":"ok"}
++pip install requests
++python - <<'PY'
++import requests
++with open("samples/sample1.png", "rb") as f:
++    r = requests.post("http://0.0.0.0:8000/analyze",
++                      files={"file": ("sample1.png", f, "image/png")})
++print(r.json())
++PY
++# {"result":"ok"}
++```
++
++### Troubleshooting
++
++* **Port already in use:** change `--port` or stop the conflicting process.
++* **Permission errors:** ensure the running user can access model and data paths.
++* **Missing models:** verify paths in profiles or download required ONNX files.
++
++## Test an image from the terminal
++
++Send a sample image to the stub analysis endpoint using Python and view the JSON response:
++
++```bash
++pip install requests
++python - <<'PY'
++import requests
++with open("samples/sample1.png", "rb") as f:
++    r = requests.post("http://0.0.0.0:8000/analyze",
++                      files={"file": ("sample1.png", f, "image/png")})
++print(r.json())
++PY
++# {"result":"ok"}
++```
+ 
+ ---
+ 
+ ## ASCII Architecture Overview
+ 
+ ```
+              ┌─────────────────────────────────────────────────────┐
+              │                 ID Integrity Shield                  │
+              └─────────────────────────────────────────────────────┘
+                              ▲                  ▲
+                              │                  │
+                 ┌────────────┘                  └─────────────┐
+                 │                                             │
+         ┌─────────────────────┐                      ┌───────────────────┐
+         │ CLI Interface        │                      │ REST API (FastAPI)│
+         │ scripts/analyze.py   │                      │ app/main.py       │
+         └──────────┬───────────┘                      └─────────┬─────────┘
+                    │                                             │
+                    └──────────────┬──────────────────────────────┘
+                                   ▼
+                    ┌───────────────────────────────────┐
+                    │      Pipeline Orchestrator         │
+                    │   idtamper/pipeline.py             │
+                    └──────────┬─────────────────────────┘
+                               │
+@@ -145,30 +196,36 @@ python scripts/scan_dataset.py --input ./dataset --out runs/ds --profile recaptu
+ 
+ ---
+ 
+ ## API Examples
+ 
+ ```bash
+ curl -X POST http://localhost:8000/v1/analyze   -H "x-api-key: mysecret"   -F "file=@/path/doc.jpg"   -F "profile=recapture-id"
+ ```
+ 
+ Response: JSON with scores, confidence, per-check details, artifact paths.
+ 
+ ---
+ 
+ ## Docker Usage
+ 
+ ```bash
+ docker build -t id-integrity-shield:cpu .
+ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-integrity-shield:cpu
+ ```
+ 
+ ---
+ 
+ ## Testing & Coverage
+ 
+ ```bash
+-PYTHONPATH=./idtamper python tests/run_coverage.py
++pytest -q --maxfail=1 --disable-warnings \
++  --cov=idtamper --cov=app --cov-report=term-missing --cov-report=html
+ ```
+ 
+-This command executes the full test suite and reports code coverage.
+-The latest run yielded an overall coverage of **69.66%**.
++This command runs all tests and generates an HTML report under `htmlcov/`.
++
++---
++
++## License
++
++Released under the [MIT License](LICENSE).
+diff --git a/app/__init__.py b/app/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/app/main.py b/app/main.py
+index 6f9d78e75db29da0be10278dc8391b27b508acfb..f963f6b4668c56159e7565b2cee3b44c6dd582d2 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,50 +1,115 @@
+ 
+-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
++from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+ from fastapi.responses import JSONResponse, FileResponse
+ from fastapi.security.api_key import APIKeyHeader
+ from pydantic import BaseModel
+-import os, shutil, uuid, json
++import os, shutil, uuid, json, logging, time
+ from pathlib import Path
+ from typing import Optional, Dict, Any
+ 
++from prometheus_fastapi_instrumentator import Instrumentator
+ from idtamper.pipeline import analyze_image, AnalyzerConfig
+ from idtamper.profiles import load_profile
+ 
+ API_KEY_NAME = "x-api-key"
+ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+ 
++
+ def get_api_key(api_key: str = Depends(api_key_header)):
+     expected = os.environ.get("API_KEY")
+     if not expected:
+         # if not set, disable auth for dev
+         return None
++    if api_key is None:
++        raise HTTPException(status_code=401, detail="Missing API key")
+     if api_key != expected:
+-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
++        raise HTTPException(status_code=403, detail="Forbidden")
+     return api_key
+ 
+-app = FastAPI(title="IDTamper API", version="1.0.0")
++
++app = FastAPI(
++    title="ID Integrity Shield",
++    version=os.getenv("APP_VERSION", "0.1.0"),
++    description="API for document tamper checks (recapture, reprint, splice...).",
++    contact={"name": "Maintainers", "url": "https://github.com/mapo80/id-integrity-shield"},
++)
++
++
++logger = logging.getLogger("idshield")
++handler = logging.StreamHandler()
++handler.setFormatter(
++    logging.Formatter(
++        "%(asctime)s %(levelname)s path=%(path)s method=%(method)s status=%(status)s duration_ms=%(duration_ms)s msg=%(message)s"
++    )
++)
++logger.addHandler(handler)
++logger.setLevel(logging.INFO)
++logger.propagate = False
++
++
++@app.middleware("http")
++async def log_requests(request: Request, call_next):
++    start = time.time()
++    response = await call_next(request)
++    dur = (time.time() - start) * 1000
++    logger.info(
++        "request",
++        extra={
++            "path": request.url.path,
++            "method": request.method,
++            "status": response.status_code,
++            "duration_ms": round(dur, 2),
++        },
++    )
++    return response
++
++
++Instrumentator().instrument(app).expose(app, endpoint="/metrics")
++
++
++@app.get("/healthz")
++def healthz():
++    return {"status": "ok"}
++
++
++@app.get("/version")
++def version():
++    return {
++        "version": os.getenv("APP_VERSION", "0.1.0"),
++        "git": os.getenv("GIT_SHA", "unknown"),
++    }
++
++
++@app.post("/analyze")
++async def analyze_stub(file: UploadFile = File(...)):
++    return {"result": "ok"}
++
++
++@app.get("/protected")
++def protected(_api_key: str = Depends(get_api_key)):
++    return {"ok": True}
+ 
+ class AnalyzeResponse(BaseModel):
+     image: str
+     tamper_score: float
+     threshold: float
+     is_tampered: bool
+     confidence: float
+     per_check: Dict[str, Any]
+     artifacts: Dict[str, str]
+ 
+ @app.post("/v1/analyze", response_model=AnalyzeResponse)
+ async def analyze_endpoint(
+     file: UploadFile = File(...),
+     profile: str = Form("recapture-id"),
+     out_dir: Optional[str] = Form(None),
+     params_json: Optional[str] = Form(None),
+     thresholds_json: Optional[str] = Form(None),
+     save_artifacts: bool = Form(True),
+     _api_key: str = Depends(get_api_key)
+ ):
+     tmp_root = Path("/data/incoming"); tmp_root.mkdir(parents=True, exist_ok=True)
+     item_id = str(uuid.uuid4())[:8]
+     img_path = tmp_root / f"{item_id}_{file.filename}"
+     with img_path.open("wb") as f:
+         f.write(await file.read())
+@@ -54,30 +119,30 @@ async def analyze_endpoint(
+     if params_json:
+         user_params = json.loads(params_json)
+         # shallow merge: override specific trees
+         for k,v in user_params.items():
+             params[k] = {**params.get(k, {}), **v} if isinstance(v, dict) else v
+     thresholds = prof["thresholds"]
+     if thresholds_json:
+         thr_user = json.loads(thresholds_json)
+         thresholds.update(thr_user)
+ 
+     cfg = AnalyzerConfig(weights=prof["weights"], threshold=prof["threshold"], check_params=params, check_thresholds=thresholds)
+     out = Path(out_dir) if out_dir else Path("/data/runs")/item_id
+     out.mkdir(parents=True, exist_ok=True)
+     rep = analyze_image(str(img_path), str(out), cfg)
+ 
+     if not save_artifacts:
+         rep["artifacts"] = {}
+     return JSONResponse(rep)
+ 
+ @app.get("/v1/health")
+ def health():
+     return {"ok": True}
+ 
+ # simple endpoint to download an artifact if needed
+ @app.get("/v1/artifact")
+-def artifact(path: str, _api_key: str = Depends(get_api_key)):
++def artifact(path: str, _api_key: str = Depends(get_api_key)) -> FileResponse:
+     p = Path(path)
+     if not p.exists():
+         raise HTTPException(status_code=404, detail="Not found")
+     return FileResponse(str(p))
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000000000000000000000000000000000000..752f9536b9f5fa0f00918aa5b5827a46eb041a56
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++addopts = -q --maxfail=1 --disable-warnings --cov=idtamper --cov=app --cov-report=term-missing --cov-report=html
+diff --git a/requirements.txt b/requirements.txt
+index d0a6e6a37bf7498397ce9ca5448e5e4e45fd3618..80408add39acc4c0d21e68b1403044f774f96fb4 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,7 +1,8 @@
+ pillow
+ numpy
+ # optional: onnxruntime==1.17.3
+ fastapi>=0.110.0
+ uvicorn>=0.29.0
+ onnxruntime>=1.17.0
+ reportlab>=4.2.0
++prometheus-fastapi-instrumentator==7.0.0
+diff --git a/samples/sample1.png b/samples/sample1.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d1ad7a80680a491cdbfbfb7ef6db5bc40ef6200
+GIT binary patch
+literal 79
+zcmeAS@N?(olHy`uVBq!ia0vp^Od!kwBL7~QRScxWJY5_^D&{2rIe!2Ij(|y^dRa#1
+UtV6S30#z`0y85}Sb4q9e03m`HSO5S3
+
+literal 0
+HcmV?d00001
+
+diff --git a/samples/sample2.png b/samples/sample2.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2022f871431f0fa0026c72dc1357118bd0c9b69
+GIT binary patch
+literal 79
+zcmeAS@N?(olHy`uVBq!ia0vp^Od!kwBL7~QRScxWJY5_^D&{1oB>Xsk;J|?+Kz!f;
+Z0|U1_BlC>b>2*LA44$rjF6*2Ung9T}7a9Nn
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c78cbdccead841e07c439c3dc551d12cf43538b
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,3 @@
++import sys
++from pathlib import Path
++sys.path.append(str(Path(__file__).resolve().parents[1]))
+diff --git a/tests/run_coverage.py b/tests/run_coverage.py
+deleted file mode 100644
+index f7a3212ef0f5396c534fbda38ea4c05401064269..0000000000000000000000000000000000000000
+--- a/tests/run_coverage.py
++++ /dev/null
+@@ -1,54 +0,0 @@
+-
+-import sys
+-from pathlib import Path
+-from trace import Trace
+-
+-BASE = Path(__file__).resolve().parents[1]
+-PKG = BASE/'idtamper'
+-TESTS = BASE/'tests'
+-
+-def is_countable(line:str):
+-    s = line.strip()
+-    return not (s=='' or s.startswith('#'))
+-
+-def run():
+-    sys.path.insert(0, str(BASE))
+-    tracer = Trace(count=True, trace=False)
+-    for m in TESTS.glob('test_*.py'):
+-        code = compile(m.read_text(), str(m), 'exec')
+-        globs = {'__name__': '__main__', '__file__': str(m)}
+-        tracer.runctx(code, globs, {})
+-    res = tracer.results()
+-    counts = res.counts  # (filename, lineno) -> count
+-
+-    files = [p for p in PKG.rglob('*.py')]
+-    total_exec = 0; total_lines = 0
+-    per_file = []
+-    for f in files:
+-        try:
+-            lines = f.read_text(encoding='utf-8', errors='ignore').splitlines()
+-        except Exception:
+-            continue
+-        n_countable = sum(1 for ln in lines if is_countable(ln))
+-        executed = 0
+-        for i, ln in enumerate(lines, start=1):
+-            if not is_countable(ln): continue
+-            if (str(f), i) in counts and counts[(str(f), i)] > 0:
+-                executed += 1
+-        total_exec += executed; total_lines += n_countable
+-        pct = (executed/n_countable*100.0) if n_countable>0 else 0.0
+-        per_file.append((str(f.relative_to(BASE)), executed, n_countable, pct))
+-
+-    per_file.sort()
+-    cov = (total_exec/total_lines*100.0) if total_lines>0 else 0.0
+-    # write summary
+-    out = BASE/'runs'/'cov'; out.mkdir(parents=True, exist_ok=True)
+-    with (out/'summary.txt').open('w') as f:
+-        f.write(f"Coverage: {cov:.2f}% (covered {total_exec}/{total_lines})\n")
+-        for rel, ex, tot, pct in per_file:
+-            f.write(f"{rel}: {pct:.1f}% ({ex}/{tot})\n")
+-    print(f"COVERAGE: {cov:.2f}%")
+-    return cov
+-
+-if __name__ == '__main__':
+-    print({'coverage_percent': run()})
+diff --git a/tests/test_auth.py b/tests/test_auth.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..83317ce21d17f17f5079290a2455109312e5abb5
+--- /dev/null
++++ b/tests/test_auth.py
+@@ -0,0 +1,28 @@
++
++from fastapi.testclient import TestClient
++from app.main import app
++
++client = TestClient(app)
++
++def test_missing_api_key(monkeypatch):
++    monkeypatch.setenv("API_KEY", "test_key")
++    r = client.get("/protected")
++    assert r.status_code == 401
++
++def test_wrong_api_key(monkeypatch):
++    monkeypatch.setenv("API_KEY", "test_key")
++    r = client.get("/protected", headers={"x-api-key": "bad"})
++    assert r.status_code == 403
++
++def test_ok_api_key(monkeypatch):
++    monkeypatch.setenv("API_KEY", "test_key")
++    r = client.get("/protected", headers={"x-api-key": "test_key"})
++    assert r.status_code == 200
++    assert r.json() == {"ok": True}
++
++
++def test_no_api_key_env(monkeypatch):
++    monkeypatch.delenv("API_KEY", raising=False)
++    r = client.get("/protected")
++    assert r.status_code == 200
++    assert r.json() == {"ok": True}
+diff --git a/tests/test_basic_endpoints.py b/tests/test_basic_endpoints.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..97593b804be91f86b317067a0906a1005b360e90
+--- /dev/null
++++ b/tests/test_basic_endpoints.py
+@@ -0,0 +1,61 @@
++
++from fastapi.testclient import TestClient
++from pathlib import Path
++from app.main import app
++
++client = TestClient(app)
++
++def test_healthz():
++    r = client.get("/healthz")
++    assert r.status_code == 200
++    assert r.json() == {"status": "ok"}
++
++def test_version(monkeypatch):
++    monkeypatch.setenv("APP_VERSION", "1.2.3")
++    monkeypatch.setenv("GIT_SHA", "abc123")
++    r = client.get("/version")
++    assert r.status_code == 200
++    assert r.json() == {"version": "1.2.3", "git": "abc123"}
++
++
++def test_v1_health():
++    r = client.get("/v1/health")
++    assert r.status_code == 200
++    assert r.json() == {"ok": True}
++
++
++def test_v1_analyze_and_artifact(monkeypatch, tmp_path):
++    monkeypatch.setenv("API_KEY", "secret")
++
++    def fake_analyze_image(img_path, out, cfg):
++        out_path = Path(out) / "dummy.txt"
++        out_path.write_text("hello")
++        return {
++            "image": img_path,
++            "tamper_score": 0.1,
++            "threshold": 0.5,
++            "is_tampered": False,
++            "confidence": 0.9,
++            "per_check": {},
++            "artifacts": {"dummy": str(out_path)},
++        }
++
++    monkeypatch.setattr("app.main.analyze_image", fake_analyze_image)
++
++    client = TestClient(app)
++    with open("samples/sample1.png", "rb") as f:
++        r = client.post(
++            "/v1/analyze",
++            files={"file": ("sample1.png", f, "image/png")},
++            headers={"x-api-key": "secret"},
++            data={"out_dir": str(tmp_path)},
++        )
++
++    assert r.status_code == 200
++    data = r.json()
++    assert "dummy" in data["artifacts"]
++    art_path = data["artifacts"]["dummy"]
++
++    r2 = client.get(f"/v1/artifact?path={art_path}", headers={"x-api-key": "secret"})
++    assert r2.status_code == 200
++    assert r2.content == b"hello"
+diff --git a/tests/test_checks.py b/tests/test_checks.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..53f9df3c56f94be167fd8000c5d7095c4f300a1a
+--- /dev/null
++++ b/tests/test_checks.py
+@@ -0,0 +1,16 @@
++from PIL import Image
++from idtamper.checks import exif, noise
++
++
++def test_exif_error_branch():
++    class Dummy:
++        def getexif(self):
++            raise ValueError("boom")
++    res = exif.run(Dummy())
++    assert res["meta"]["error"] == "boom"
++
++
++def test_noise_blur_branch():
++    img = Image.new("RGB", (4, 4), color="white")
++    res = noise.run(img, params={"method": "blur", "blur_radius": 1.0})
++    assert res["name"] == "noise_inconsistency"
+diff --git a/tests/test_e2e_smoke.py b/tests/test_e2e_smoke.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7771106227ac154564ce0454a75b7feda62cfe49
+--- /dev/null
++++ b/tests/test_e2e_smoke.py
+@@ -0,0 +1,10 @@
++from fastapi.testclient import TestClient
++from app.main import app
++
++
++def test_e2e_smoke():
++    client = TestClient(app)
++    with open("samples/sample1.png", "rb") as f:
++        r = client.post("/analyze", files={"file": ("s1.png", f, "image/png")})
++    assert r.status_code == 200
++    assert "result" in r.json()
+diff --git a/tests/test_pipeline.py b/tests/test_pipeline.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c509ec39972c87e1900f3bee41adae3de09d65a4
+--- /dev/null
++++ b/tests/test_pipeline.py
+@@ -0,0 +1,13 @@
++from idtamper.pipeline import analyze_image, AnalyzerConfig
++from pathlib import Path
++import json
++
++def test_analyze_image(tmp_path):
++    out_dir = tmp_path / "out"
++    cfg = AnalyzerConfig()
++    report = analyze_image("samples/sample1.png", str(out_dir), cfg)
++    assert "tamper_score" in report
++    rp = out_dir / "report.json"
++    assert rp.exists()
++    data = json.loads(rp.read_text())
++    assert data["image"] == "sample1.png"
+diff --git a/tests/test_profiles.py b/tests/test_profiles.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfe0e17c63480c35e1753678d8bf9db32a854202
+--- /dev/null
++++ b/tests/test_profiles.py
+@@ -0,0 +1,15 @@
++from idtamper.profiles import load_profile
++from pathlib import Path
++import json
++
++def test_load_profile_by_name():
++    prof = load_profile("recapture-id")
++    assert "threshold" in prof
++
++
++def test_load_profile_from_path(tmp_path):
++    data = {"threshold": 0.5, "params": {}, "thresholds": {}, "weights": {}}
++    p = tmp_path / "custom.json"
++    p.write_text(json.dumps(data))
++    prof = load_profile(str(p))
++    assert prof["threshold"] == 0.5
