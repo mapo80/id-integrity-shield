@@ -1,14 +1,18 @@
 import io, json, os, pathlib
-from fastapi.testclient import TestClient
-
-# usa la TUA app FastAPI
-from app.main import app
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 MODELS = ROOT / "models"
 PROFILES = ROOT / "profiles"
 SAMPLES = ROOT / "samples"
+
+# ensure app uses local models and profiles
+os.environ.setdefault("IDS_MODELS_DIR", str(MODELS))
+os.environ.setdefault("IDS_PROFILES_DIR", str(PROFILES))
+
+from fastapi.testclient import TestClient
+# usa la TUA app FastAPI
+from app.main import app
 
 def test_models_exist_and_readable():
     assert MODELS.exists(), "La cartella models/ deve esistere"
@@ -51,7 +55,7 @@ def test_analyze_endpoint_end2end():
     }
 
     files = {"file": (sample.name, io.BytesIO(data), "image/jpeg")}
-    form = {"profile": "recapture-id", "params": json.dumps(params)}
+    form = {"profile": "recapture-id@2", "params": json.dumps(params)}
     resp = client.post("/v1/analyze", files=files, data=form)
     assert resp.status_code == 200, resp.text
     body = resp.json()

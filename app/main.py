@@ -115,7 +115,7 @@ def _resolve_model_path(model_path: Optional[str]) -> Optional[str]:
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(
     file: UploadFile = File(...),
-    profile: str = Form("recapture-id"),
+    profile: str = Form("recapture-id@2"),
     out_dir: Optional[str] = Form(None),
     params_json: Optional[str] = Form(None),
     thresholds_json: Optional[str] = Form(None),
@@ -172,7 +172,13 @@ async def analyze_endpoint(
     decision = prof.get("decision") or {}
     global_threshold = decision.get("threshold", prof.get("threshold", 0.5))
 
-    # ----- Modello principale per AnalyzerConfig (eliminato 'weights' nei profili) -----
+    # ----- Pesi dei check per l'aggregazione -----
+    weights = {
+        name: (cfg.get("weight", 0.0) if isinstance(cfg, dict) else 0.0)
+        for name, cfg in checks.items() if isinstance(cfg, dict)
+    }
+
+    # ----- Verifica che almeno un modello ONNX principale sia abilitato -----
     main_model = None
     for cand in ("mantranet", "noiseprintpp"):
         if cand in checks and checks[cand].get("enabled"):
@@ -182,11 +188,11 @@ async def analyze_endpoint(
     if not main_model:
         raise HTTPException(
             status_code=500,
-            detail="No main ONNX model resolved (expected 'mantranet' or 'noiseprintpp' enabled in profile)."
+            detail="No main ONNX model resolved (expected 'mantranet' or 'noiseprintpp' enabled in profile).",
         )
 
     cfg = AnalyzerConfig(
-        weights=main_model,                 # ← il parametro della pipeline resta 'weights', ma non proviene più dal profilo
+        weights=weights,
         threshold=global_threshold,
         check_params=params,
         check_thresholds=thresholds
