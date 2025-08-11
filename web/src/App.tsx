@@ -25,7 +25,7 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
-  const profile = import.meta.env.VITE_DEFAULT_PROFILE || "recapture-id";
+  const profile = import.meta.env.VITE_DEFAULT_PROFILE || "recapture-id@2";
 
   const props = {
     name: "file",
