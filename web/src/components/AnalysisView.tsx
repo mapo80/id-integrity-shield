@@ -53,20 +53,20 @@ import { verdictFromReport, summarize } from '../utils'
      { title: 'Descrizione', dataIndex: 'description', key: 'description' },
    ]
 
-   const data = checks.map(([name, c]) => {
-     const score = c?.score ?? 0
-     const weight = c?.weight ?? 0
-     return {
-       key: name,
-       name,
-       score: c?.score,
-       threshold: c?.threshold,
-       weight: c?.weight,
-       contribution: score * weight,
-       decision: c?.decision,
-       description: CHECK_DESCRIPTIONS[name] || '-',
-     }
-   })
+  const data = checks.map(([name, c]) => {
+    const score = c?.score
+    const weight = c?.weight
+    return {
+      key: name,
+      name,
+      score,
+      threshold: c?.threshold,
+      weight,
+      contribution: score != null && weight != null ? score * weight : undefined,
+      decision: c?.decision,
+      description: CHECK_DESCRIPTIONS[name] || '-',
+    }
+  })
 
    const artifacts: Array<{ label: string; url: string; isImage: boolean; type: string }> = []
    const artifactKeys = new Set<string>()
