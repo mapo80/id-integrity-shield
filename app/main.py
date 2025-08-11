@@ -206,9 +206,32 @@ async def analyze_endpoint(
     # enrich report for frontend
     rep["profile_id"] = profile
     rep["checks"] = rep.get("per_check", {})
+
+    # merge profile-defined checks so the table is never empty and
+    # fill missing metadata (threshold, weight, direction, description)
+    for name, cfg_chk in prof.get("checks", {}).items():
+        chk = rep["checks"].setdefault(name, {})
+        if isinstance(cfg_chk, dict):
+            chk.setdefault("threshold", cfg_chk.get("threshold"))
+            chk.setdefault("weight", float(cfg_chk.get("weight", 0.0)))
+            chk.setdefault("direction", cfg_chk.get("direction"))
+            chk.setdefault("description", cfg_chk.get("description"))
+
+    # normalize decision/outcome; if score missing mark as undefined
     for name, chk in rep["checks"].items():
-        chk["weight"] = float(weights.get(name, 0.0))
-        chk["decision"] = chk.get("flag")
+        if chk.get("score") is None:
+            chk["decision"] = None
+        else:
+            if "flag" in chk:
+                chk["decision"] = chk.get("flag")
+            else:
+                thr = chk.get("threshold")
+                dir_ = chk.get("direction", ">=")
+                if thr is not None:
+                    chk["decision"] = chk["score"] >= thr if dir_ == ">=" else chk["score"] <= thr
+                else:
+                    chk["decision"] = None
+
     rep["decision"] = {"threshold": rep.get("threshold"), "verdict": rep.get("is_tampered")}
 
     if save_artifacts:
