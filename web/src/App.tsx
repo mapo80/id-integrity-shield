@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import React, { useMemo, useState } from 'react'
 import { Layout, ConfigProvider, theme, Row, Col, Card, Form, Input, Button, Space, Spin, Alert } from 'antd'
 import { CloudUploadOutlined, ThunderboltOutlined } from '@ant-design/icons'
