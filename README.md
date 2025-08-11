@@ -152,7 +152,7 @@ overridden from the CLI:
 ```
 
 ```bash
-python scripts/analyze.py img.png --profile recapture-id \
+python scripts/analyze.py img.png --profile recapture-id@2 \
   --max-parallel-images 2 --parallel-signal-checks \
   --onnx-intra-threads 2 --onnx-inter-threads 1
 ```
@@ -169,8 +169,8 @@ default) and can be disabled with `--no-parallel-signal-checks` when needed.
 Use `scripts/bench_parallelism.py` to measure performance:
 
 ```bash
-python scripts/bench_parallelism.py --dataset samples --profile recapture-id --serial
-python scripts/bench_parallelism.py --dataset samples --profile recapture-id --parallel
+python scripts/bench_parallelism.py --dataset samples --profile recapture-id@2 --serial
+python scripts/bench_parallelism.py --dataset samples --profile recapture-id@2 --parallel
 ```
 
 Example results on a 4‑core host:
@@ -246,10 +246,10 @@ Each run directory contains:
 
 ```bash
 # Single image analysis
-python scripts/analyze.py input.jpg -o runs/item --profile recapture-id   --params '{"noiseprintpp":{"model_path":"/app/models_store/noiseprintpp.onnx"}}'
+python scripts/analyze.py input.jpg -o runs/item --profile recapture-id@2   --params '{"noiseprintpp":{"model_path":"/app/models_store/noiseprintpp.onnx"}}'
 
 # Dataset scan
-python scripts/scan_dataset.py --input ./dataset --out runs/ds --profile recapture-id --save-artifacts
+python scripts/scan_dataset.py --input ./dataset --out runs/ds --profile recapture-id@2 --save-artifacts
 ```
 
 ---
@@ -257,7 +257,7 @@ python scripts/scan_dataset.py --input ./dataset --out runs/ds --profile recaptu
 ## API Examples
 
 ```bash
-curl -X POST http://localhost:8000/v1/analyze   -H "x-api-key: mysecret"   -F "file=@/path/doc.jpg"   -F "profile=recapture-id"
+curl -X POST http://localhost:8000/v1/analyze   -H "x-api-key: mysecret"   -F "file=@/path/doc.jpg"   -F "profile=recapture-id@2"
 ```
 
 Response: JSON with scores, confidence, per-check details, artifact paths.
@@ -268,7 +268,11 @@ Response: JSON with scores, confidence, per-check details, artifact paths.
 
 ```bash
 docker build -t id-integrity-shield:cpu .
-docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-integrity-shield:cpu
+docker run --rm -p 8000:8000 \
+  -e API_KEY=mysecret \
+  -e IDS_MODELS_DIR=/app/models -e IDS_PROFILES_DIR=/app/profiles \
+  -v $PWD/data:/data \
+  id-integrity-shield:cpu
 ```
 
 ---
@@ -277,10 +281,10 @@ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-int
 
 - Downloaded `GRC.zip` from [Zenodo](https://zenodo.org/records/13854938).
 - Extracted a random ~50 MB subset (121 genuine, 120 tampered images) into `data/idnet_sample`.
-- Running `scripts/scan_dataset.py` with `recapture-id` profile and real ONNX models requires substantial CPU time; full processing of the subset exceeded the resources available in this environment.
+- Running `scripts/scan_dataset.py` with `recapture-id@2` profile and real ONNX models requires substantial CPU time; full processing of the subset exceeded the resources available in this environment.
 - To reproduce on a more powerful host, ensure `models/noiseprint_pp.onnx` and `models/mantranet_256x256.onnx` exist and run:
   ```bash
-  python scripts/scan_dataset.py --input data/idnet_sample --out runs/idnet --profile recapture-id --params params.json
+  python scripts/scan_dataset.py --input data/idnet_sample --out runs/idnet --profile recapture-id@2 --params params.json
   ```
 
 ## Testing & Coverage
