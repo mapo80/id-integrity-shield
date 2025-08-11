@@ -11,14 +11,14 @@ def run(pil_image, params=None):
     - Else -> return score=None with reason.
     Params:
       model_path: str | None
-      input_size: [H,W] (default [512,512])
+      input_size: [H,W] or None (auto from model if not given)
       top_percent: float (default 1.0)
       mock: bool (default False)
     Output: {name:'mantranet', score, map, meta}
     """
     p = params or {}
     top_percent = float(p.get('top_percent', 1.0))
-    Ht, Wt = (p.get('input_size') or [512,512])
+    Ht, Wt = (p.get('input_size') or [None, None])
     session = p.get('session')
     model_path = p.get('model_path')
     mock = bool(p.get('mock', False))
@@ -34,11 +34,22 @@ def run(pil_image, params=None):
 
     if session is not None:
         try:
-            im = pil_image.convert('RGB').resize((Wt, Ht))
-            arr = (np.asarray(im).astype('float32')/255.0)
             inp = session.get_inputs()[0]
             shape = inp.shape
             channels_first = len(shape) >= 4 and shape[1] == 3
+            if Ht is None or Wt is None:
+                try:
+                    if channels_first:
+                        Ht = int(shape[2])
+                        Wt = int(shape[3])
+                    else:
+                        Ht = int(shape[1])
+                        Wt = int(shape[2])
+                except Exception:
+                    Ht, Wt = 256, 256
+                logger.info("ManTraNet input size auto-detected as (%d,%d)", Ht, Wt)
+            im = pil_image.convert('RGB').resize((Wt, Ht))
+            arr = (np.asarray(im).astype('float32')/255.0)
             if channels_first:
                 x = np.transpose(arr, (2,0,1))[None, ...]  # NCHW
             else:
