@@ -222,17 +222,21 @@ def artifact(path: str, _api_key: str = Depends(get_api_key)) -> FileResponse:
 from fastapi.responses import FileResponse as _FileResponse  # evita shadowing
 from starlette.staticfiles import StaticFiles
 
-# monta la cartella statici della SPA
-app.mount("/static", StaticFiles(directory="static"), name="static")
+STATIC_DIR = Path("static")
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# index e fallback SPA
-@app.get("/", include_in_schema=False)
-def serve_index():
-    return _FileResponse(os.path.join("static", "index.html"))
+    @app.get("/", include_in_schema=False)
+    def serve_index():
+        return _FileResponse(STATIC_DIR / "index.html")
 
-@app.get("/{full_path:path}", include_in_schema=False)
-def spa_fallback(full_path: str):
-    candidate = os.path.join("static", full_path)
-    if os.path.isfile(candidate):
-        return _FileResponse(candidate)
-    return _FileResponse(os.path.join("static", "index.html"))
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        candidate = STATIC_DIR / full_path
+        if candidate.is_file():
+            return _FileResponse(candidate)
+        return _FileResponse(STATIC_DIR / "index.html")
+else:
+    @app.get("/", include_in_schema=False)
+    def serve_index_missing():
+        raise HTTPException(status_code=404, detail="Not found")
