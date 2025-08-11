@@ -194,7 +194,7 @@ import { verdictFromReport, summarize } from '../utils'
        </Card>
 
        <Card className="card" title={<Typography.Text style={{ color: 'white' }}>Dettaglio controlli</Typography.Text>}>
-         <Table columns={columns} dataSource={data} pagination={false} scroll={{ x: true }} />
+         <Table columns={columns} dataSource={data} pagination={false} scroll={{ x: true }} locale={{ emptyText: 'Nessun controllo disponibile' }} />
          <Typography.Paragraph style={{ color: 'white', marginTop: 12 }}>
            Tamper score = Σ(score × peso) / Σ(pesi) = {calcScore != null ? calcScore.toFixed(3) : 'n/d'}
          </Typography.Paragraph>

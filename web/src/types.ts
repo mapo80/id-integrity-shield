@@ -11,7 +11,9 @@ export type SdkReport = {
   profile_id?: string
   tamper_score?: number
   confidence?: number
+  threshold?: number
   decision?: { metric?: string; threshold?: number; verdict?: boolean } | boolean
+  per_check?: Record<string, CheckResult>
   checks?: Record<string, CheckResult>
   artifacts?: Record<string, string>
   metrics?: any

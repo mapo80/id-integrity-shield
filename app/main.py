@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import os, uuid, json, logging, time
 from pathlib import Path
 from typing import Optional, Dict, Any
+from starlette.staticfiles import StaticFiles
 
 from prometheus_fastapi_instrumentator import Instrumentator
 from idtamper.pipeline import analyze_image, AnalyzerConfig
@@ -15,11 +16,9 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 # ----- Path dati e modelli (configurabili via env) -----
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
-INCOMING_DIR = DATA_DIR / "incoming"
 RUNS_DIR = DATA_DIR / "runs"
 MODELS_DIR = Path(os.getenv("IDS_MODELS_DIR", "/app/models"))
-for _d in (INCOMING_DIR, RUNS_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 def get_api_key(api_key: str = Depends(api_key_header)):
     expected = os.environ.get("API_KEY")
@@ -38,6 +37,9 @@ app = FastAPI(
     description="API for document tamper checks (recapture, reprint, splice...).",
     contact={"name": "Maintainers", "url": "https://github.com/mapo80/id-integrity-shield"},
 )
+
+# expose analysis artifacts via static paths
+app.mount("/runs", StaticFiles(directory=RUNS_DIR), name="runs")
 
 logger = logging.getLogger("idshield")
 handler = logging.StreamHandler()
@@ -79,10 +81,6 @@ def version():
         "git": os.getenv("GIT_SHA", "unknown"),
     }
 
-@app.post("/analyze")
-async def analyze_stub(file: UploadFile = File(...)):
-    return {"result": "ok"}
-
 @app.get("/protected")
 def protected(_api_key: str = Depends(get_api_key)):
     return {"ok": True}
@@ -94,7 +92,10 @@ class AnalyzeResponse(BaseModel):
     is_tampered: bool
     confidence: float
     per_check: Dict[str, Any]
+    checks: Dict[str, Any]
     artifacts: Dict[str, str]
+    profile_id: Optional[str] = None
+    decision: Optional[Any] = None
 
 # --- registry modelli interno all’app (profili NON devono contenere i path) ---
 # puoi personalizzare via env:
@@ -122,9 +123,12 @@ async def analyze_endpoint(
     save_artifacts: bool = Form(True),
     _api_key: str = Depends(get_api_key)
 ):
-    # --- salva upload in path scrivibile ---
-    item_id = str(uuid.uuid4())[:8]
-    img_path = INCOMING_DIR / f"{item_id}_{file.filename}"
+    # --- salva upload in directory run dedicata ---
+    run_id = str(uuid.uuid4())
+    out = Path(out_dir) if out_dir else RUNS_DIR / run_id
+    out.mkdir(parents=True, exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1] or ".bin"
+    img_path = out / f"original{ext}"
     with img_path.open("wb") as f:
         f.write(await file.read())
 
@@ -198,13 +202,39 @@ async def analyze_endpoint(
         check_thresholds=thresholds
     )
 
-    out = Path(out_dir) if out_dir else RUNS_DIR / item_id
-    out.mkdir(parents=True, exist_ok=True)
     rep = analyze_image(str(img_path), str(out), cfg)
+    # enrich report for frontend
+    rep["profile_id"] = profile
+    rep["checks"] = rep.get("per_check", {})
+    for name, chk in rep["checks"].items():
+        chk["weight"] = float(weights.get(name, 0.0))
+        chk["decision"] = chk.get("flag")
+    rep["decision"] = {"threshold": rep.get("threshold"), "verdict": rep.get("is_tampered")}
 
-    if not save_artifacts:
-        rep["artifacts"] = {}
+    if save_artifacts:
+        if rep.get("artifacts"):
+            new_art = {}
+            for k, v in rep["artifacts"].items():
+                p = Path(v)
+                new_art[k] = str(p) if p.is_absolute() else f"/runs/{run_id}/{v}"
+            rep["artifacts"] = new_art
+        else:
+            rep["artifacts"] = {}
+
+        # normalize check-level artifact paths as well
+        if rep.get("checks"):
+            for chk in rep["checks"].values():
+                if isinstance(chk, dict) and chk.get("artifacts"):
+                    new_ca = {}
+                    for k, v in chk["artifacts"].items():
+                        p = Path(v)
+                        new_ca[k] = str(p) if p.is_absolute() else f"/runs/{run_id}/{v}"
+                    chk["artifacts"] = new_ca
+    rep["run_id"] = run_id
     return JSONResponse(rep)
+
+# compatibilità con vecchio endpoint
+app.post("/analyze", response_model=AnalyzeResponse)(analyze_endpoint)
 
 @app.get("/v1/health")
 def health():
@@ -213,7 +243,12 @@ def health():
 # simple endpoint to download an artifact if needed
 @app.get("/v1/artifact")
 def artifact(path: str, _api_key: str = Depends(get_api_key)) -> FileResponse:
-    p = Path(path)
+    if path.startswith("/runs/"):
+        p = DATA_DIR / path.lstrip("/")
+    else:
+        p = Path(path)
+        if not p.is_absolute():
+            p = DATA_DIR / p
     if not p.exists():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(str(p))

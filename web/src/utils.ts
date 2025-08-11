@@ -4,7 +4,7 @@ export function verdictFromReport(rep: SdkReport): {verdict: 'TAMPERED'|'CLEAN'|
   if (typeof rep.decision === 'boolean') {
     return { verdict: rep.decision ? 'TAMPERED' : 'CLEAN' }
   }
-  const thr = rep.decision?.threshold
+  const thr = rep.decision?.threshold ?? rep.threshold
   if (typeof rep.tamper_score === 'number' && typeof thr === 'number') {
     return { verdict: rep.tamper_score >= thr ? 'TAMPERED' : 'CLEAN', threshold: thr }
   }
@@ -22,9 +22,10 @@ export function summarize(rep: SdkReport): string {
     const thr = v.threshold != null ? ` (soglia ${v.threshold.toFixed(2)})` : ''
     lines.push(`Tamper score: ${score.toFixed(3)}${thr} ⇒ verdetto: ${v.verdict}.`)
   }
-  if (typeof conf === 'number') lines.push(`Confidenza: ${Math.round(conf*100)}%.`)
+  if (typeof conf === 'number') lines.push(`Confidenza del verdetto: ${Math.round(conf*100)}% (0%=incerto, 100%=massima).`)
+  if (v.verdict === 'UNKNOWN') lines.push('Il verdetto è UNKNOWN perché mancano score o soglia.')
 
-  if (rep.checks) {
+  if (rep.checks && Object.keys(rep.checks).length) {
     const items = Object.entries(rep.checks).map(([name, c]) => {
       const s = c?.score != null ? c.score.toFixed(3) : 'n/d'
       const t = c?.threshold != null ? c.threshold.toFixed(2) : 'n/d'
@@ -34,6 +35,8 @@ export function summarize(rep: SdkReport): string {
     })
     lines.push('Dettaglio controlli:')
     lines.push(...items)
+  } else {
+    lines.push('Nessun controllo eseguito.')
   }
 
   const hms: string[] = []
