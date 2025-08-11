@@ -1,0 +1,4 @@
+{
+  "noiseprintpp": {"model_path": "models/noiseprint_pp.onnx"},
+  "mantranet": {"model_path": "models/mantranet_256x256.onnx"}
+}
