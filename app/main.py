@@ -146,3 +146,21 @@ def artifact(path: str, _api_key: str = Depends(get_api_key)) -> FileResponse:
     if not p.exists():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(str(p))
+
+# --- Static SPA (web/dist -> /app/static) ---
+import os
+from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles
+
+if os.getenv("SERVE_WEB", "1") == "1" and os.path.isdir("static"):
+    # assets in /static
+    app.mount("/static", StaticFiles(directory="static", html=False), name="static")
+
+    # home e fallback SPA: definiti DOPO le API, così non le coprono
+    @app.get("/", include_in_schema=False)
+    async def spa_index():
+        return FileResponse("static/index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        return FileResponse("static/index.html")
