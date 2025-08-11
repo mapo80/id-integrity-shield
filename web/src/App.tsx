@@ -1,27 +1,20 @@
 // web/src/App.tsx
 import React, { useMemo, useState } from "react";
 import { Upload, Typography, Button, Card, Space, Image, Alert, Spin, Progress, message } from "antd";
-import { InboxOutlined, CheckCircleTwoTone, CloseCircleTwoTone, CloudUploadOutlined, DeleteOutlined } from "@ant-design/icons";
+import { InboxOutlined, CheckCircleTwoTone, CloudUploadOutlined, DeleteOutlined } from "@ant-design/icons";
+import AnalysisView from "./components/AnalysisView";
+import type { SdkReport } from "./types";
+import { analyzeImage } from "./api";
 
 const { Dragger } = Upload;
 const { Title, Text } = Typography;
-
-type AnalyzeResponse = {
-  image: string;
-  tamper_score: number;
-  threshold: number;
-  is_tampered: boolean;
-  confidence: number;
-  per_check: Record<string, any>;
-  artifacts: Record<string, string>;
-};
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [uploadPct, setUploadPct] = useState<number>(0);
   const [loading, setLoading] = useState(false);
-  const [resp, setResp] = useState<AnalyzeResponse | null>(null);
+  const [resp, setResp] = useState<SdkReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
@@ -57,30 +50,15 @@ export default function App() {
       setErr(null);
       setResp(null);
 
-      const form = new FormData();
-      form.append("file", file);
-      form.append("profile", profile);
-      // niente params_json: i path modello sono risolti dal backend
-
-      // usa fetch nativo; incrementa una finta progress bar per UX
       const progTimer = setInterval(() => {
         setUploadPct((p) => (p < 90 ? p + 5 : p));
       }, 150);
 
-      const r = await fetch("/v1/analyze", {
-        method: "POST",
-        body: form,
-      }).finally(() => {
+      const data = await analyzeImage(file, { profile }).finally(() => {
         clearInterval(progTimer);
       });
 
       setUploadPct(100);
-
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(text || `HTTP ${r.status}`);
-      }
-      const data = (await r.json()) as AnalyzeResponse;
       setResp(data);
     } catch (e: any) {
       setErr(e?.message ?? "Errore sconosciuto");
@@ -212,29 +190,8 @@ export default function App() {
             />
           )}
 
-          {/* Risultato */}
-          {resp && (
-            <Card style={{ borderRadius: 16, background: "rgba(255,255,255,0.04)" }}>
-              <Space direction="vertical" size="small" style={{ width: "100%" }}>
-                <Title level={4} style={{ color: "white", margin: 0 }}>
-                  Risultato
-                </Title>
-                <Text style={{ color: "rgba(255,255,255,0.85)" }}>
-                  Tamper score: <b>{resp.tamper_score.toFixed(3)}</b> — soglia: <b>{resp.threshold.toFixed(3)}</b> —{" "}
-                  {resp.is_tampered ? (
-                    <span style={{ color: "#ff7875", fontWeight: 600 }}>
-                      <CloseCircleTwoTone twoToneColor="#ff7875" /> TAMPERED
-                    </span>
-                  ) : (
-                    <span style={{ color: "#95de64", fontWeight: 600 }}>
-                      <CheckCircleTwoTone twoToneColor="#95de64" /> CLEAN
-                    </span>
-                  )}
-                </Text>
-                {/* Puoi arricchire qui con heatmap/artifacts */}
-              </Space>
-            </Card>
-          )}
+            {/* Risultato */}
+            {resp && <AnalysisView fileUrl={previewUrl} report={resp} />}
         </Space>
       </div>
     </div>
