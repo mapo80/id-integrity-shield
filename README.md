@@ -264,6 +264,12 @@ Response: JSON with scores, confidence, per-check details, artifact paths.
 
 ---
 
+## Web Viewer
+
+The `web/` folder contains a React + Ant Design front-end that calls the REST API and renders the full report: per-check scores, thresholds, weights, contributions and descriptions, all generated artifacts with a legend, and the final tamper score with its formula. See [`web/README.md`](web/README.md) for setup instructions (`npm run dev`).
+
+---
+
 ## Docker Usage
 
 ```bash

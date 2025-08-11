@@ -1,6 +1,6 @@
 # ID Integrity Shield — Viewer (React + Vite + Ant Design)
 
-Un'app leggera per vedere in azione lo SDK: carichi **una sola immagine**, avvii l'analisi, e visualizzi **verdetto**, **punteggi/soglie**, **heatmap/overlay** e una **descrizione testuale**.
+Un'app leggera per vedere in azione lo SDK: carichi **una sola immagine**, avvii l'analisi e visualizzi **tutti i dati del report**: verdetto con soglia, tabella dei singoli check (score, soglia, peso, contributo e spiegazione), **artefatti** con legenda e **descrizione testuale**.
 
 ## Requisiti
 - Node.js 18+
@@ -56,7 +56,8 @@ Le chiavi `heatmap`/`overlay` possono essere URL assoluti oppure percorsi; se il
 ## UI
 - **Dropzone (singolo file)** con Upload.Dragger
 - **Loader** (Spin) durante l'analisi
-- **Verdetto + progress** del tamper score
-- **Tab visuali**: originale | heatmap/overlay (preview-group)
-- **Tabella dettagli** per check (score, soglia, peso, decisione)
+- **Verdetto + progress** del tamper score e soglia finale
+- **Tab artefatti** con anteprima di tutte le immagini generate e legenda
+- **Tabella dettagli** per check (score, soglia, peso, contributo, esito, descrizione)
+- **Formula** del tamper score mostrata sotto la tabella
 - **Descrizione testuale** autogenerata
