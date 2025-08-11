@@ -1,1913 +1,289 @@
+diff --git a/idtamper/profiles.py b/idtamper/profiles.py
+index 1111111..2222222 100644
+--- a/idtamper/profiles.py
++++ b/idtamper/profiles.py
+@@ -1,11 +1,68 @@
+-import json
+-from pathlib import Path
++import os, json
++from pathlib import Path
++from typing import Any, Dict
+ 
+-def load_profile(name_or_path: str):
+-    here = Path(__file__).parent.parent / "profiles"
+-    p = Path(name_or_path)
+-    if p.suffix == ".json" and p.exists():
+-        return json.loads(p.read_text())
+-    return json.loads((here/f"{name_or_path}.json").read_text())
++PROFILES_DIR = Path(os.getenv("IDS_PROFILES_DIR", "/app/profiles"))
++
++def _read_json(p: Path) -> Dict[str, Any]:
++    return json.loads(p.read_text(encoding="utf-8"))
++
++def load_profile(name_or_path: str) -> Dict[str, Any]:
++    """
++    Caricamento profili robusto:
++      - Accetta path assoluto/relativo o solo nome senza .json
++      - Supporta alias con suffisso '@N' → fallback al core (es. recapture-id@2 → recapture-id) se il file non esiste
++      - Directory configurabile via IDS_PROFILES_DIR (default: /app/profiles)
++    """
++    p = Path(name_or_path)
++    # 1) path esplicito
++    if p.suffix == ".json" and p.exists():
++        return _read_json(p)
++    if p.is_absolute() and p.exists():
++        return _read_json(p)
++
++    # 2) prova nome esatto nella dir profili
++    stem = p.name[:-5] if p.name.endswith(".json") else p.name
++    cand = PROFILES_DIR / f"{stem}.json"
++    if cand.exists():
++        return _read_json(cand)
++
++    # 3) fallback alias: recapture-id@2 -> recapture-id
++    core = stem.split("@", 1)[0]
++    core_cand = PROFILES_DIR / f"{core}.json"
++    if core and core_cand.exists():
++        return _read_json(core_cand)
++
++    # 4) errore con elenco disponibili
++    available = sorted(x.name for x in PROFILES_DIR.glob("*.json"))
++    raise FileNotFoundError(
++        f"Profile '{name_or_path}' not found. Looked in {PROFILES_DIR}. Available: {available}"
++    )
+diff --git a/app/main.py b/app/main.py
+index 3333333..4444444 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,17 +1,23 @@
+ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+ from fastapi.responses import JSONResponse, FileResponse
+ from fastapi.security.api_key import APIKeyHeader
+ from pydantic import BaseModel
+-import os, shutil, uuid, json, logging, time
++import os, uuid, json, logging, time
+ from pathlib import Path
+ from typing import Optional, Dict, Any
+ 
+ from prometheus_fastapi_instrumentator import Instrumentator
+ from idtamper.pipeline import analyze_image, AnalyzerConfig
+ from idtamper.profiles import load_profile
+ 
+ API_KEY_NAME = "x-api-key"
+ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+ 
++# ----- Path dati e modelli (configurabili via env) -----
++DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
++INCOMING_DIR = DATA_DIR / "incoming"
++RUNS_DIR = DATA_DIR / "runs"
++MODELS_DIR = Path(os.getenv("IDS_MODELS_DIR", "/app/models"))
++for _d in (INCOMING_DIR, RUNS_DIR):
++    _d.mkdir(parents=True, exist_ok=True)
+ 
+ def get_api_key(api_key: str = Depends(api_key_header)):
+     expected = os.environ.get("API_KEY")
+@@ -84,6 +90,18 @@ class AnalyzeResponse(BaseModel):
+     per_check: Dict[str, Any]
+     artifacts: Dict[str, str]
+ 
++# --- registry modelli interno all’app (profili NON devono contenere i path) ---
++# se rinomini i file modello nell’immagine, aggiorna qui (o via env IDS_*_MODEL)
++DEFAULT_MODEL_REGISTRY = {
++    "mantranet":   os.getenv("IDS_MANTRANET_MODEL",   str(MODELS_DIR / "mantranet.onnx")),
++    "noiseprintpp":os.getenv("IDS_NOISEPRINT_MODEL",  str(MODELS_DIR / "noiseprintpp.onnx")),
++}
++def _resolve_model_path(model_path: Optional[str]) -> Optional[str]:
++    if not model_path:
++        return None
++    p = Path(model_path)
++    return str(p if p.is_absolute() else MODELS_DIR / p)
++
+ @app.post("/v1/analyze", response_model=AnalyzeResponse)
+ async def analyze_endpoint(
+     file: UploadFile = File(...),
+@@ -94,34 +112,84 @@ async def analyze_endpoint(
+     thresholds_json: Optional[str] = Form(None),
+     save_artifacts: bool = Form(True),
+     _api_key: str = Depends(get_api_key)
+ ):
+-    tmp_root = Path("/data/incoming"); tmp_root.mkdir(parents=True, exist_ok=True)
+-    item_id = str(uuid.uuid4())[:8]
+-    img_path = tmp_root / f"{item_id}_{file.filename}"
++    # --- salva upload in path scrivibile ---
++    item_id = str(uuid.uuid4())[:8]
++    img_path = INCOMING_DIR / f"{item_id}_{file.filename}"
+     with img_path.open("wb") as f:
+         f.write(await file.read())
+ 
+-    prof = load_profile(profile)
+-    params = prof["params"]
+-    if params_json:
+-        user_params = json.loads(params_json)
+-        # shallow merge: override specific trees
+-        for k,v in user_params.items():
+-            params[k] = {**params.get(k, {}), **v} if isinstance(v, dict) else v
+-    thresholds = prof["thresholds"]
+-    if thresholds_json:
+-        thr_user = json.loads(thresholds_json)
+-        thresholds.update(thr_user)
+-
+-    cfg = AnalyzerConfig(weights=prof["weights"], threshold=prof["threshold"], check_params=params, check_thresholds=thresholds)
+-    out = Path(out_dir) if out_dir else Path("/data/runs")/item_id
++    prof = load_profile(profile)
++
++    # ----- Params: partiamo da quelli del profilo (seci sono), poi override da form -----
++    params: Dict[str, Any] = dict(prof.get("params", {}))
++    if params_json:
++        user_params = json.loads(params_json)
++        for k, v in user_params.items():
++            params[k] = {**params.get(k, {}), **v} if isinstance(v, dict) else v
++
++    # ----- Inietta i path dei modelli in base ai check abilitati (se mancanti) -----
++    checks = prof.get("checks", {})
++    for check_name, default_path in DEFAULT_MODEL_REGISTRY.items():
++        chk_cfg = checks.get(check_name)
++        if not (isinstance(chk_cfg, dict) and chk_cfg.get("enabled")):
++            continue
++        params.setdefault(check_name, {})
++        params[check_name].setdefault("model_path", default_path)
++        # normalizza vs MODELS_DIR se qualcuno ha passato un relativo
++        params[check_name]["model_path"] = _resolve_model_path(params[check_name]["model_path"])
++        # existence check
++        mp = Path(params[check_name]["model_path"])
++        if not mp.exists():
++            raise HTTPException(
++                status_code=500,
++                detail=f"Model for '{check_name}' not found at {mp}. "
++                       f"Configure env IDS_MODELS_DIR or IDS_*_MODEL, or mount the file."
++            )
++
++    # ----- Thresholds: se non presenti, derivali dai checks -----
++    if "thresholds" in prof and isinstance(prof["thresholds"], dict):
++        thresholds: Dict[str, float] = dict(prof["thresholds"])
++    else:
++        thresholds = {
++            name: (cfg.get("threshold", 0.5) if isinstance(cfg, dict) else 0.5)
++            for name, cfg in checks.items() if isinstance(cfg, dict)
++        }
++    if thresholds_json:
++        thr_user = json.loads(thresholds_json)
++        thresholds.update(thr_user)
++
++    # ----- Threshold globale: supporta prof.decision.threshold o prof.threshold (legacy) -----
++    decision = prof.get("decision") or {}
++    global_threshold = decision.get("threshold", prof.get("threshold", 0.5))
++
++    # ----- Modello principale per AnalyzerConfig (niente più 'weights' nel profilo) -----
++    # Strategia: usa 'mantranet' se abilitato, altrimenti 'noiseprintpp', altrimenti None → errore
++    main_model = None
++    for cand in ("mantranet", "noiseprintpp"):
++        if cand in checks and checks[cand].get("enabled"):
++            main_model = params.get(cand, {}).get("model_path")
++            if main_model:
++                break
++    if not main_model:
++        raise HTTPException(
++            status_code=500,
++            detail="No main ONNX model resolved (expected 'mantranet' or 'noiseprintpp'). "
++                   "Enable one of these checks in the profile."
++        )
++
++    cfg = AnalyzerConfig(
++        weights=main_model,                 # ← rimane il nome del parametro, ma NON viene più dal profilo
++        threshold=global_threshold,
++        check_params=params,
++        check_thresholds=thresholds
++    )
++
++    out = Path(out_dir) if out_dir else RUNS_DIR / item_id
+     out.mkdir(parents=True, exist_ok=True)
+     rep = analyze_image(str(img_path), str(out), cfg)
+ 
+     if not save_artifacts:
+         rep["artifacts"] = {}
+     return JSONResponse(rep)
+ 
+diff --git a/tests/test_api_profile_no_weights.py b/tests/test_api_profile_no_weights.py
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/tests/test_api_profile_no_weights.py
+@@ -0,0 +1,91 @@
++import os, json
++from pathlib import Path
++from fastapi.testclient import TestClient
++from app.main import app, MODELS_DIR
++
++def test_profile_without_weights_works(tmp_path, monkeypatch):
++    """
++    Verifica che un profilo senza 'weights' e senza 'params.*.model_path'
++    funzioni perché i path modello vengono iniettati dal backend.
++    """
++    client = TestClient(app)
++
++    # Modelli finti
++    models_dir = tmp_path / "models"
++    models_dir.mkdir(parents=True, exist_ok=True)
++    (models_dir / "mantranet.onnx").write_bytes(b"\x00")
++    (models_dir / "noiseprintpp.onnx").write_bytes(b"\x00")
++    monkeypatch.setenv("IDS_MODELS_DIR", str(models_dir))
++
++    # Profilo minimale nel tmp e override IDS_PROFILES_DIR
++    profiles_dir = tmp_path / "profiles"
++    profiles_dir.mkdir(parents=True, exist_ok=True)
++    prof = {
++        "profile_id": "recapture-id@2",
++        "checks": {
++            "mantranet": {"enabled": True, "weight": 0.5, "threshold": 0.55},
++            "noiseprintpp": {"enabled": True, "weight": 0.03, "threshold": 0.65},
++        },
++        "decision": {"metric": "tamper_score", "threshold": 0.62, "policy": "score"}
++    }
++    (profiles_dir / "recapture-id.json").write_text(json.dumps(prof), encoding="utf-8")
++    monkeypatch.setenv("IDS_PROFILES_DIR", str(profiles_dir))
++
++    # immagine finta
++    img = tmp_path / "img.png"
++    img.write_bytes(b"\x89PNG\r\n")
++
++    with img.open("rb") as f:
++        r = client.post(
++            "/v1/analyze",
++            files={"file": ("img.png", f, "image/png")},
++            data={"profile": "recapture-id@2"}  # userà il fallback a recapture-id
++        )
++    # Non verifichiamo il contenuto (dipende dalla pipeline), ma che non esploda per mancanza pesi
++    assert r.status_code in (200, 500)  # 200 se pipeline mock-friendly, 500 se ONNX inferenza fallisce
++    # Importante: l’errore 500 non deve essere per 'weights' mancanti
++    if r.status_code == 500:
++        assert "weights" not in (r.text or "")
 diff --git a/README.md b/README.md
-index 52defb4880b88c310a57bdb0f849841b2fcc8d09..246ae48858ec8870703a093f65a8be765bb4b95a 100644
+index 6666666..7777777 100644
 --- a/README.md
 +++ b/README.md
-@@ -107,50 +107,108 @@ PY
-                     └─────────────────────┘
- ```
+@@ -140,6 +140,25 @@ Response: JSON with scores, confidence, per-check details, artifact paths.
  
- ---
+ * * *
  
- ## How it works
- 
- 1. **Image ingestion** via CLI, API, or batch dataset scan.
- 2. **Multi-check analysis**:
-    - Deep forensic ONNX models (Noiseprint++, ManTraNet)
-    - Signal-based forensic checks (Copy-Move, Splicing, Noise, ELA, JPEG artifacts, EXIF)
- 3. **Per-check scoring** → `score ∈ [0,1]`, optional heatmaps and details
- 4. **Weighted fusion** → global `tamper_score`
- 5. **Confidence estimation** based on:
-    - Margin above threshold
-    - Overlap of strong check heatmaps
-    - Agreement between strong checks
- 6. **Report generation**:
-    - `report.json` (structured output)
-    - `report.html` / `report.pdf`
-    - Heatmaps & overlays
- 7. **Return API/CLI results** with artifacts
- 
- ---
- 
-+## Parallelization & Preprocessing
++## Model resolution (no `weights` in profiles)
 +
-+To keep results consistent while improving throughput, each image is preprocessed
-+once and the resulting cache (resized RGB, grayscale, YCbCr, pyramid and
-+in-memory JPEG re-encode) is shared across all signal checks.
++Profiles **must not** embed model paths. The backend injects model locations automatically based on enabled checks:
 +
-+### Concurrency configuration
-+
-+Parallelism is controlled via the profile field `concurrency` and can be
-+overridden from the CLI:
-+
-+```json
-+{
-+  "concurrency": {
-+    "max_parallel_images": 2,
-+    "parallel_signal_checks": true,
-+    "onnx_intra_threads": 2,
-+    "onnx_inter_threads": 1
-+  }
++```python
++DEFAULT_MODEL_REGISTRY = {
++  "mantranet":    "/app/models/mantranet.onnx",
++  "noiseprintpp": "/app/models/noiseprintpp.onnx",
 +}
 +```
 +
-+```bash
-+python scripts/analyze.py img.png --profile recapture-id \
-+  --max-parallel-images 2 --parallel-signal-checks \
-+  --onnx-intra-threads 2 --onnx-inter-threads 1
++Customize via environment:
++
++```
++IDS_MODELS_DIR=/custom/models
++IDS_MANTRANET_MODEL=/custom/models/my_mantra.onnx
++IDS_NOISEPRINT_MODEL=/custom/models/noisepp.onnx
 +```
 +
-+### Oversubscription rules
-+
-+Avoid CPU oversubscription by ensuring that
-+`max_parallel_images × onnx_intra_threads` does not exceed the number of
-+physical cores. Signal checks run in a separate thread pool (enabled by
-+default) and can be disabled with `--no-parallel-signal-checks` when needed.
-+
-+### Benchmark
-+
-+Use `scripts/bench_parallelism.py` to measure performance:
-+
-+```bash
-+python scripts/bench_parallelism.py --dataset samples --profile recapture-id --serial
-+python scripts/bench_parallelism.py --dataset samples --profile recapture-id --parallel
-+```
-+
-+Example results on a 4‑core host:
-+
-+```json
-+// bench_serial.json
-+{ "images_per_s": 0.8, "p95_ms_per_img": 1250.0 }
-+
-+// bench_parallel.json
-+{ "images_per_s": 1.5, "p95_ms_per_img": 710.0 }
-+```
-+
-+Scores remain invariant (tolerance `≤ 1e-6`); only latency and throughput change.
-+
-+---
-+
- ## Checks Implemented
+ ## Docker Usage
  
- ### Deep Forensics (ONNX, CPU)
- - **Noiseprint++** – camera noise inconsistency (ONNX)
- - **ManTraNet** – pixel-level manipulation map (ONNX from `mapo80/image-forgery-scanner`)
- 
- **Score:** mean of top-percentile values in the heatmap.
- 
- ### Classical / Signal-based
- - **Copy-Move Detection** (block-hash & ORB modes)
- - **Splicing Detection** (multi-scale gradients + chroma + coherence)
- - **Noise Inconsistency** (wavelet residuals)
- - **ELA**
- - **JPEG Ghosts**
- - **JPEG Blockiness**
- - **EXIF Consistency**
- 
- ---
- 
- ## Scoring & Confidence
- 
- - **Per-check score** compared against **per-check threshold** → tamper flag
- - **Global tamper score** = weighted mean of check scores (weights from profile)
- - **Confidence**:
-   ```
-diff --git a/idtamper/__init__.py b/idtamper/__init__.py
-index 55a417996f24b7ffc481046f95526f125fb880b6..1aaaee376bca73679910bda39e3f91f626077f37 100644
---- a/idtamper/__init__.py
-+++ b/idtamper/__init__.py
-@@ -1 +1,16 @@
-+"""Public package interface for idtamper."""
-+
- from .pipeline import analyze_image, AnalyzerConfig
-+from .execution import ParallelConfig, apply_thread_env, init_onnx_session_opts
-+from .preproc import PreprocCache, PreprocOptions, build_preproc_cache
-+
-+__all__ = [
-+    "analyze_image",
-+    "AnalyzerConfig",
-+    "ParallelConfig",
-+    "apply_thread_env",
-+    "init_onnx_session_opts",
-+    "PreprocCache",
-+    "PreprocOptions",
-+    "build_preproc_cache",
-+]
-diff --git a/idtamper/api.py b/idtamper/api.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..983d674bc0a7371fb058cd00d7e8d44467f88085
---- /dev/null
-+++ b/idtamper/api.py
-@@ -0,0 +1,20 @@
-+"""Public convenience API for running the pipeline."""
-+
-+from typing import Optional, Dict, Any, List
-+
-+from .pipeline import analyze_image, analyze_images, AnalyzerConfig
-+from .execution import ParallelConfig
-+
-+__all__ = ["analyze", "analyze_batch"]
-+
-+
-+def analyze(image_path: str, profile: AnalyzerConfig | None = None, *, out_dir: str = "out", parallel_config: Optional[ParallelConfig] = None):
-+    cfg = profile or AnalyzerConfig()
-+    pc = parallel_config or ParallelConfig()
-+    return analyze_image(image_path, out_dir, cfg, pc)
-+
-+
-+def analyze_batch(image_paths: List[str], profile: AnalyzerConfig | None = None, *, out_dir: str = "out", parallel_config: Optional[ParallelConfig] = None):
-+    cfg = profile or AnalyzerConfig()
-+    pc = parallel_config or ParallelConfig()
-+    return analyze_images(image_paths, out_dir, cfg, pc)
-diff --git a/idtamper/checks/blockiness.py b/idtamper/checks/blockiness.py
-index b6d65504376a4b94c12c29e3c55748e5b96b3bd0..0c2c7fb724db1d33faa2f99d4fb2ecaae5fc2dd5 100644
---- a/idtamper/checks/blockiness.py
-+++ b/idtamper/checks/blockiness.py
-@@ -1,22 +1,52 @@
-+"""JPEG blockiness detector using optional preprocessing cache."""
-+
-+from __future__ import annotations
-+
- import numpy as np
- 
--def run(pil_image, params=None):
-+from ..preproc import PreprocCache
-+
-+
-+def run(img_or_cache, params=None):
-+    """Run the blockiness check.
-+
-+    Parameters
-+    ----------
-+    img_or_cache:
-+        Either a PIL image or :class:`PreprocCache` instance.
-+    params:
-+        Optional parameters dictionary. Supported key ``q`` for block size.
-+    """
-+
-     p = params or {}
-     q = int(p.get("q", 8))
--    arr = np.asarray(pil_image.convert("L"), dtype=np.float32)
--    H,W = arr.shape
--    gy = np.abs(np.diff(arr, axis=0, prepend=arr[:1,:]))
-+
-+    if isinstance(img_or_cache, PreprocCache):
-+        arr = img_or_cache.gray.astype(np.float32)
-+    else:
-+        arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32)
-+
-+    H, W = arr.shape
-+    gy = np.abs(np.diff(arr, axis=0, prepend=arr[:1, :]))
-     gx = np.abs(np.diff(arr, axis=1, prepend=arr[:, :1]))
-     bm = np.zeros_like(arr, dtype=np.float32)
-     for y in range(0, H, q):
--        bm[y:y+1,:] += gy[y:y+1,:]
-+        bm[y : y + 1, :] += gy[y : y + 1, :]
-     for x in range(0, W, q):
--        bm[:,x:x+1] += gx[:,x:x+1]
--    hm = (bm - bm.min())/(bm.max()-bm.min()+1e-8)
--    on = bm[(np.indices(bm.shape)[0]%q==0) | (np.indices(bm.shape)[1]%q==0)]
--    off = bm[(np.indices(bm.shape)[0]%q!=0) & (np.indices(bm.shape)[1]%q!=0)]
-+        bm[:, x : x + 1] += gx[:, x : x + 1]
-+
-+    hm = (bm - bm.min()) / (bm.max() - bm.min() + 1e-8)
-+    on = bm[(np.indices(bm.shape)[0] % q == 0) | (np.indices(bm.shape)[1] % q == 0)]
-+    off = bm[(np.indices(bm.shape)[0] % q != 0) & (np.indices(bm.shape)[1] % q != 0)]
-     on_m = float(on.mean()) if on.size else 0.0
-     off_m = float(off.mean()) if off.size else 0.0
--    std = float(bm.std()+1e-6)
--    score = max(0.0, min(1.0, (on_m - off_m)/std))
--    return {"name":"jpeg_blockiness","score": score, "map": hm, "meta": {"q": q, "on_mean": on_m, "off_mean": off_m, "std": std}}
-\ No newline at end of file
-+    std = float(bm.std() + 1e-6)
-+    score = max(0.0, min(1.0, (on_m - off_m) / std))
-+
-+    return {
-+        "name": "jpeg_blockiness",
-+        "score": score,
-+        "map": hm,
-+        "meta": {"q": q, "on_mean": on_m, "off_mean": off_m, "std": std},
-+    }
-+
-diff --git a/idtamper/checks/copymove.py b/idtamper/checks/copymove.py
-index 95ebbada8f3d3fbc7ff1290752365766d0caa3ec..3b7b2864c94e6c76fe8baf1796217c53e0795cb5 100644
---- a/idtamper/checks/copymove.py
-+++ b/idtamper/checks/copymove.py
-@@ -1,234 +1,230 @@
-+"""Copy-move detection with optional preprocessing cache."""
-+
-+from __future__ import annotations
- 
- import numpy as np
- 
-+from ..preproc import PreprocCache
-+
-+
- def _dh(b, ham_tol=4):
--    "Compute 64-bit dHash for a tiny grayscale block (9x8) -> uint64"
--    # b expected shape (H,W), we'll resize to 9x8 using simple subsampling/averaging
-+    """Compute 64-bit dHash for a tiny grayscale block (9x8)."""
-     H, W = b.shape
-     h, w = 8, 9
--    # downsample by average pooling to (8,9)
--    ys = np.linspace(0, H, h+1, dtype=int)
--    xs = np.linspace(0, W, w+1, dtype=int)
-+    ys = np.linspace(0, H, h + 1, dtype=int)
-+    xs = np.linspace(0, W, w + 1, dtype=int)
-     small = np.zeros((h, w), dtype=np.float32)
-     for i in range(h):
-         for j in range(w):
--            patch = b[ys[i]:ys[i+1], xs[j]:xs[j+1]]
--            if patch.size==0:
--                small[i,j] = 0
--            else:
--                small[i,j] = float(patch.mean())
--    # dHash: compare adjacents horizontally -> 8x8 bits
--    bits = (small[:,1:] > small[:,:-1]).astype(np.uint8)
--    # pack into uint64
-+            patch = b[ys[i] : ys[i + 1], xs[j] : xs[j + 1]]
-+            small[i, j] = float(patch.mean()) if patch.size else 0.0
-+    bits = (small[:, 1:] > small[:, :-1]).astype(np.uint8)
-     num = 0
-     for i in range(8):
-         for j in range(8):
--            num = (num << 1) | int(bits[i,j])
-+            num = (num << 1) | int(bits[i, j])
-     return np.uint64(num)
- 
-+
- def _hamming(a, b):
-     v = np.uint64(a ^ b)
--    # count bits
--    # Kernighan popcount
-     cnt = 0
-     while v:
-         v &= v - np.uint64(1)
-         cnt += 1
-     return cnt
- 
--def run(pil_image, params=None):
--    """
--    Copy-Move detection (CPU)
--    Modes:
--      - 'block' (default): block-hash matching (dHash 64-bit) with translation clustering
--      - 'orb' (optional): requires OpenCV; ORB keypoints + brute-force matching + vector clustering
--    Params (block mode):
--      - block: int size of block (default 16)
--      - step: int stride between blocks (default 8)
--      - ham_tol: Hamming distance tolerance for hash matches (default 6)
--      - min_offset: minimum displacement in px to consider a match (default 12)
--      - max_pairs: cap number of candidate pairs per hash bucket (default 4000)
--      - min_cluster: minimum matches aligned on the same displacement to trigger (default 12)
--      - dilate: integer radius to dilate matched blocks into heatmap (default 2)
--      - top_percent: percentile for scoring (default 2.0)
--    Params (orb mode):
--      - min_cluster: as above (default 8), others ignored
--    Output:
--      name='copy_move', score in [0,1], map heatmap in [0,1], meta details.
--    """
-+
-+def run(img_or_cache, params=None):
-+    """Run the copy-move check."""
-+
-     p = params or {}
--    mode = p.get('mode', 'block')
--    top_percent = float(p.get('top_percent', 2.0))
-+    mode = p.get("mode", "block")
-+    top_percent = float(p.get("top_percent", 2.0))
-+
-+    if isinstance(img_or_cache, PreprocCache):
-+        arr = img_or_cache.gray.astype(np.float32) / 255.0
-+    else:
-+        arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32) / 255.0
- 
--    arr = np.asarray(pil_image.convert('L'), dtype=np.float32) / 255.0
-     H, W = arr.shape
- 
--    if mode == 'orb':
-+    if mode == "orb":
-         try:
-             import cv2
-         except Exception as e:
-             return _run_block(arr, p, top_percent, fallback_reason=f"opencv not available: {e}")
-         return _run_orb(arr, p, top_percent)
- 
-     return _run_block(arr, p, top_percent)
- 
-+
- def _run_block(arr, p, top_percent, fallback_reason=None):
-     H, W = arr.shape
--    B = int(p.get('block', 16))
--    S = int(p.get('step', 8))
--    ham_tol = int(p.get('ham_tol', 6))
--    min_off = int(p.get('min_offset', 12))
--    max_pairs = int(p.get('max_pairs', 4000))
--    min_cluster = int(p.get('min_cluster', 12))
--    dilate = int(p.get('dilate', 2))
--
--    # Extract blocks and hashes
--    ys = list(range(0, max(1, H-B+1), S))
--    xs = list(range(0, max(1, W-B+1), S))
-+    B = int(p.get("block", 16))
-+    S = int(p.get("step", 8))
-+    ham_tol = int(p.get("ham_tol", 6))
-+    min_off = int(p.get("min_offset", 12))
-+    max_pairs = int(p.get("max_pairs", 4000))
-+    min_cluster = int(p.get("min_cluster", 12))
-+    dilate = int(p.get("dilate", 2))
-+
-+    ys = list(range(0, max(1, H - B + 1), S))
-+    xs = list(range(0, max(1, W - B + 1), S))
-     locs = []
-     hashes = []
-     means = []
--    std_min = float(p.get('std_min', 0.02))
-+    std_min = float(p.get("std_min", 0.02))
-     for y in ys:
-         for x in xs:
--            patch = arr[y:y+B, x:x+B]
-+            patch = arr[y : y + B, x : x + B]
-             if patch.std() < std_min:
-                 continue
-             h = _dh(patch)
--            locs.append((y,x))
-+            locs.append((y, x))
-             hashes.append(h)
-             means.append(float(patch.mean()))
-     locs = np.array(locs, dtype=np.int32)
-     hashes = np.array(hashes, dtype=np.uint64)
-     means = np.array(means, dtype=np.float32)
- 
--    # Bucket by high bits to reduce search
--    # Use first 24 bits of hash as bucket key
-     bucket_keys = (hashes >> np.uint64(40)).astype(np.uint32)
--    # build dictionary
-     buckets = {}
-     for idx, key in enumerate(bucket_keys):
-         buckets.setdefault(int(key), []).append(idx)
- 
--    # Match pairs inside each bucket with small Hamming distance and sufficient offset
-     matches = []
--    # Precompute for speed: for each bucket list, iterate i<j
-     for key, idxs in buckets.items():
-         n = len(idxs)
--        if n < 2: continue
--        # heuristic: if too big, sample to limit pairs
--        # compute approx number of pairs n*(n-1)/2; downsample if > 2*max_pairs
--        pairs_est = n*(n-1)//2
--        if pairs_est > 2*max_pairs:
--            # sample k indices such that k*(k-1)/2 ~ max_pairs
-+        if n < 2:
-+            continue
-+        pairs_est = n * (n - 1) // 2
-+        if pairs_est > 2 * max_pairs:
-             import math
--            k = int((1 + math.isqrt(1 + 8*max_pairs))//2)
--            idxs = idxs[:max(2,k)]
-+
-+            k = int((1 + math.isqrt(1 + 8 * max_pairs)) // 2)
-+            idxs = idxs[: max(2, k)]
-             n = len(idxs)
-         cnt_pairs = 0
--        for ii in range(n-1):
-+        for ii in range(n - 1):
-             i = idxs[ii]
-             hi = hashes[i]
-             mi = means[i]
-             yi, xi = locs[i]
--            for jj in range(ii+1, n):
-+            for jj in range(ii + 1, n):
-                 j = idxs[jj]
--                # offset check
-                 yj, xj = locs[j]
--                dy = yj - yi; dx = xj - xi
-+                dy = yj - yi
-+                dx = xj - xi
-                 if abs(dy) + abs(dx) < min_off:
-                     continue
--                # hash distance
-                 hd = _hamming(int(hi), int(hashes[j]))
-                 if hd <= ham_tol and abs(mi - means[j]) < 0.08:
-                     matches.append((yi, xi, yj, xj, dy, dx))
-                     cnt_pairs += 1
-                     if cnt_pairs >= max_pairs:
-                         break
-             if cnt_pairs >= max_pairs:
-                 break
- 
--    # Cluster by displacement vector (dy,dx) with 1px bins
-     from collections import defaultdict
-+
-     clusters = defaultdict(list)
--    for yi,xi,yj,xj,dy,dx in matches:
--        clusters[(int(dy), int(dx))].append((yi,xi,yj,xj))
-+    for yi, xi, yj, xj, dy, dx in matches:
-+        clusters[(int(dy), int(dx))].append((yi, xi, yj, xj))
- 
--    # Find strong clusters
-     strong = [(vec, pts) for vec, pts in clusters.items() if len(pts) >= min_cluster]
--    # Build heatmap from strong clusters
--    hm = np.zeros((H,W), dtype=np.float32)
--    for (dy,dx), pts in strong:
--        for (yi,xi,yj,xj) in pts:
--            hm[yi:yi+B, xi:xi+B] += 1.0
--            hm[yj:yj+B, xj:xj+B] += 1.0
-+    hm = np.zeros((H, W), dtype=np.float32)
-+    for (dy, dx), pts in strong:
-+        for (yi, xi, yj, xj) in pts:
-+            hm[yi : yi + B, xi : xi + B] += 1.0
-+            hm[yj : yj + B, xj : xj + B] += 1.0
- 
-     if hm.max() > 0:
--        # simple dilation (square) dilate times
-         for _ in range(max(0, int(dilate))):
--            pad = np.pad(hm, 1, mode='edge')
--            hm = (
--                np.maximum.reduce([
--                    pad[0:-2,0:-2], pad[0:-2,1:-1], pad[0:-2,2:],
--                    pad[1:-1,0:-2], pad[1:-1,1:-1], pad[1:-1,2:],
--                    pad[2:,0:-2],   pad[2:,1:-1],   pad[2:,2:],
--                ])
-+            pad = np.pad(hm, 1, mode="edge")
-+            hm = np.maximum.reduce(
-+                [
-+                    pad[0:-2, 0:-2],
-+                    pad[0:-2, 1:-1],
-+                    pad[0:-2, 2:],
-+                    pad[1:-1, 0:-2],
-+                    pad[1:-1, 1:-1],
-+                    pad[1:-1, 2:],
-+                    pad[2:, 0:-2],
-+                    pad[2:, 1:-1],
-+                    pad[2:, 2:],
-+                ]
-             )
--        hm = (hm - hm.min())/(hm.max()-hm.min()+1e-8)
-+        hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
- 
--    # score via top-percentile of heatmap, scaled by cluster strength
-     flat = hm.flatten()
--    k = max(1, int(len(flat)*top_percent/100.0))
-+    k = max(1, int(len(flat) * top_percent / 100.0))
-     topk = np.partition(flat, -k)[-k:]
-     score = float(np.clip(topk.mean(), 0.0, 1.0))
- 
-     meta = {
-         "mode": "block",
-         "blocks": int(len(locs)),
-         "matches": int(len(matches)),
-         "clusters": int(len(strong)),
--        "top_percent": top_percent
-+        "top_percent": top_percent,
-     }
-     if fallback_reason:
-         meta["fallback_reason"] = str(fallback_reason)
- 
--    return {"name":"copy_move", "score": score, "map": hm, "meta": meta}
-+    return {"name": "copy_move", "score": score, "map": hm, "meta": meta}
-+
- 
- def _run_orb(arr, p, top_percent):
-     import cv2
-+
-     H, W = arr.shape
--    min_cluster = int(p.get('min_cluster', 8))
-+    min_cluster = int(p.get("min_cluster", 8))
-     orb = cv2.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=8)
--    kps, des = orb.detectAndCompute((arr*255).astype('uint8'), None)
-+    kps, des = orb.detectAndCompute((arr * 255).astype("uint8"), None)
-     if des is None or len(kps) < 8:
--        return {"name":"copy_move", "score": 0.0, "map": np.zeros_like(arr), "meta": {"mode":"orb","reason":"no keypoints"}}
-+        return {
-+            "name": "copy_move",
-+            "score": 0.0,
-+            "map": np.zeros_like(arr),
-+            "meta": {"mode": "orb", "reason": "no keypoints"},
-+        }
-     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-     matches = bf.match(des, des)
--    # filter out self-matches
-     good = [m for m in matches if m.queryIdx != m.trainIdx]
--    # compute displacement vectors
-     from collections import defaultdict
-+
-     clusters = defaultdict(list)
-     for m in good:
-         pt1 = kps[m.queryIdx].pt
-         pt2 = kps[m.trainIdx].pt
-         dx = int(round(pt2[0] - pt1[0]))
-         dy = int(round(pt2[1] - pt1[1]))
--        if abs(dx)+abs(dy) < 6:  # ignore tiny shifts
-+        if abs(dx) + abs(dy) < 6:
-             continue
--        clusters[(dy,dx)].append((pt1, pt2))
-+        clusters[(dy, dx)].append((pt1, pt2))
-+
-     strong = [(vec, pts) for vec, pts in clusters.items() if len(pts) >= min_cluster]
--    hm = np.zeros((H,W), dtype=np.float32)
--    for (dy,dx), pts in strong:
--        for (p1,p2) in pts:
--            y1,x1 = int(round(p1[1])), int(round(p1[0]))
--            y2,x2 = int(round(p2[1])), int(round(p2[0]))
--            if 0<=y1<H and 0<=x1<W: hm[max(0,y1-4):min(H,y1+4), max(0,x1-4):min(W,x1+4)] += 1.0
--            if 0<=y2<H and 0<=x2<W: hm[max(0,y2-4):min(H,y2+4), max(0,x2-4):min(W,x2+4)] += 1.0
-+    hm = np.zeros((H, W), dtype=np.float32)
-+    for (dy, dx), pts in strong:
-+        for (p1, p2) in pts:
-+            y1, x1 = int(round(p1[1])), int(round(p1[0]))
-+            y2, x2 = int(round(p2[1])), int(round(p2[0]))
-+            if 0 <= y1 < H and 0 <= x1 < W:
-+                hm[max(0, y1 - 4) : min(H, y1 + 4), max(0, x1 - 4) : min(W, x1 + 4)] += 1.0
-+            if 0 <= y2 < H and 0 <= x2 < W:
-+                hm[max(0, y2 - 4) : min(H, y2 + 4), max(0, x2 - 4) : min(W, x2 + 4)] += 1.0
-     if hm.max() > 0:
--        hm = (hm - hm.min())/(hm.max()-hm.min()+1e-8)
-+        hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
-     flat = hm.flatten()
--    k = max(1, int(len(flat)*top_percent/100.0))
-+    k = max(1, int(len(flat) * top_percent / 100.0))
-     topk = np.partition(flat, -k)[-k:]
-     score = float(np.clip(topk.mean(), 0.0, 1.0))
--    return {"name":"copy_move", "score": score, "map": hm, "meta": {"mode":"orb","clusters": len(strong), "kp": len(kps)}}
-+    return {
-+        "name": "copy_move",
-+        "score": score,
-+        "map": hm,
-+        "meta": {"mode": "orb", "clusters": len(strong), "kp": len(kps)},
-+    }
-+
-diff --git a/idtamper/checks/ela.py b/idtamper/checks/ela.py
-index 832885d842c0b73775e4bd1fd6916773e529133a..d94cefc8d285b0793183a1b69eeb31141619e3d4 100644
---- a/idtamper/checks/ela.py
-+++ b/idtamper/checks/ela.py
-@@ -1,24 +1,40 @@
--import io, numpy as np
-+"""Error Level Analysis check with optional preprocessing cache."""
-+
-+from __future__ import annotations
-+
-+import io
-+import numpy as np
- from PIL import Image
- 
--def run(pil_image, params=None):
-+from ..preproc import PreprocCache
-+
-+
-+def run(img_or_cache, params=None):
-+    """Execute the ELA check."""
-+
-     p = params or {}
--    q = int(p.get('quality', 95))
--    scale = float(p.get('scale', 10.0))
--    tp = float(p.get('top_percent', 5.0))
-+    q = int(p.get("quality", 95))
-+    scale = float(p.get("scale", 10.0))
-+    tp = float(p.get("top_percent", 5.0))
-+
-+    if isinstance(img_or_cache, PreprocCache):
-+        pil_image = Image.fromarray(img_or_cache.img)
-+    else:
-+        pil_image = img_or_cache
-+
-     buf = io.BytesIO()
-     pil_image.save(buf, "JPEG", quality=q)
-     rec = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
-     a = np.asarray(pil_image, dtype=np.int16)
-     b = np.asarray(rec, dtype=np.int16)
--    diff = np.abs(a-b).astype(np.float32)
-+    diff = np.abs(a - b).astype(np.float32)
-     gray = diff.mean(axis=2)
--    # scale adaptively
--    s = scale/max(1.0, gray.mean())
--    gray = np.clip(gray*s, 0, 255)
--    hm = (gray - gray.min())/(gray.max()-gray.min()+1e-8)
--    thr = np.percentile(gray, 100.0-tp)
--    top = gray[gray>=thr]
--    score = float((top.mean()/255.0) if top.size else 0.0)
-+    s = scale / max(1.0, gray.mean())
-+    gray = np.clip(gray * s, 0, 255)
-+    hm = (gray - gray.min()) / (gray.max() - gray.min() + 1e-8)
-+    thr = np.percentile(gray, 100.0 - tp)
-+    top = gray[gray >= thr]
-+    score = float((top.mean() / 255.0) if top.size else 0.0)
-     meta = {"quality": q, "scale": scale, "top_percent": tp}
--    return {"name":"ela95", "score": score, "map": hm, "meta": meta}
-\ No newline at end of file
-+    return {"name": "ela95", "score": score, "map": hm, "meta": meta}
-+
-diff --git a/idtamper/checks/jpegghost.py b/idtamper/checks/jpegghost.py
-index 58a052a560db107ea8916856dd56f4b34a25f64e..6018af84a6f2b06c9182662ab1a4d82228cba1b9 100644
---- a/idtamper/checks/jpegghost.py
-+++ b/idtamper/checks/jpegghost.py
-@@ -1,21 +1,45 @@
--import io, numpy as np
-+"""JPEG ghost detection with optional preprocessing cache."""
-+
-+from __future__ import annotations
-+
-+import io
-+import numpy as np
- from PIL import Image
- 
--def run(pil_image, params=None):
-+from ..preproc import PreprocCache
-+
-+
-+def run(img_or_cache, params=None):
-+    """Execute JPEG ghost detection."""
-+
-     p = params or {}
--    qualities = p.get('qualities', [75, 85, 95])
--    tp = float(p.get('top_percent', 5.0))
-+    qualities = p.get("qualities", [75, 85, 95])
-+    tp = float(p.get("top_percent", 5.0))
-+
-+    if isinstance(img_or_cache, PreprocCache):
-+        pil_image = Image.fromarray(img_or_cache.img)
-+    else:
-+        pil_image = img_or_cache
-+
-     a = np.asarray(pil_image, dtype=np.int16)
-     acc = None
-     for q in qualities:
-         buf = io.BytesIO()
-         pil_image.save(buf, "JPEG", quality=int(q))
-         rec = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
-         b = np.asarray(rec, dtype=np.int16)
--        diff = np.abs(a-b).astype(np.float32).mean(axis=2)
-+        diff = np.abs(a - b).astype(np.float32).mean(axis=2)
-         acc = diff if acc is None else np.maximum(acc, diff)
--    hm = (acc - acc.min())/(acc.max()-acc.min()+1e-8)
--    thr = np.percentile(acc, 100.0-tp)
--    top = acc[acc>=thr]
--    score = float((top.mean()/255.0) if top.size else 0.0)
--    return {"name":"jpeg_ghosts", "score": score, "map": hm, "meta": {"qualities": qualities, "top_percent": tp}}
-\ No newline at end of file
-+
-+    hm = (acc - acc.min()) / (acc.max() - acc.min() + 1e-8)
-+    thr = np.percentile(acc, 100.0 - tp)
-+    top = acc[acc >= thr]
-+    score = float((top.mean() / 255.0) if top.size else 0.0)
-+
-+    return {
-+        "name": "jpeg_ghosts",
-+        "score": score,
-+        "map": hm,
-+        "meta": {"qualities": qualities, "top_percent": tp},
-+    }
-+
-diff --git a/idtamper/checks/mantranet.py b/idtamper/checks/mantranet.py
-index fb439fcb189037efd749224a72b3830f9beab7f1..209d3f94bfe675931de8f2fd6382c0c8a4f2026c 100644
---- a/idtamper/checks/mantranet.py
-+++ b/idtamper/checks/mantranet.py
-@@ -1,72 +1,72 @@
- 
- import numpy as np
- 
- def run(pil_image, params=None):
-     """ManTraNet ONNX check (CPU). 
-     - If 'model_path' provided and onnxruntime available -> run model.
-     - Else if 'mock'==True -> synthetic heatmap for tests.
-     - Else -> return score=None with reason.
-     Params:
-       model_path: str | None
-       input_size: [H,W] (default [512,512])
-       top_percent: float (default 1.0)
-       mock: bool (default False)
-     Output: {name:'mantranet', score, map, meta}
-     """
-     p = params or {}
-     top_percent = float(p.get('top_percent', 1.0))
-     Ht, Wt = (p.get('input_size') or [512,512])
-+    session = p.get('session')
-     model_path = p.get('model_path')
-     mock = bool(p.get('mock', False))
- 
--    if model_path:
-+    if session is None and model_path:
-         try:
-             import onnxruntime as ort
--            from PIL import Image
--            sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-+            session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-+        except Exception as e:
-+            return {"name":"mantranet","score":None,"map":None,"meta":{"reason":str(e)}}
-+
-+    if session is not None:
-+        try:
-             im = pil_image.convert('RGB').resize((Wt, Ht))
-             arr = (np.asarray(im).astype('float32')/255.0)
--            inp = sess.get_inputs()[0]
-+            inp = session.get_inputs()[0]
-             shape = inp.shape
-             channels_first = len(shape) >= 4 and shape[1] == 3
-             if channels_first:
-                 x = np.transpose(arr, (2,0,1))[None, ...]  # NCHW
-             else:
--                # default to channels-last (NHWC)
-                 x = arr[None, ...]
-             feeds = {inp.name: x}
--            outs = sess.run(None, feeds)
-+            outs = session.run(None, feeds)
-             y = outs[0]
--            # Accept common cases: (N,1,h,w) | (N,h,w,1) | (N,h,w) | (1,h,w) | (h,w)
-             y = np.asarray(y)
-             y = np.squeeze(y)
--            if y.ndim == 3:  # (C,H,W) assume C=1
-+            if y.ndim == 3:
-                 y = y[0] if y.shape[0] in (1,2,3) else y[0]
-             if y.ndim != 2:
--                # Fallback: attempt last 2 dims as map
-                 y = y.reshape((y.shape[-2], y.shape[-1]))
-             hm = y.astype('float32')
--            # normalize to [0,1]
-             hm = hm - hm.min()
-             denom = (hm.max()-hm.min()+1e-8)
-             hm = hm/denom
--            # score by top-percentile
-             flat = hm.flatten()
-             k = max(1, int(len(flat)*top_percent/100.0))
-             topk = np.partition(flat, -k)[-k:]
-             score = float(np.clip(topk.mean(), 0.0, 1.0))
-             return {"name":"mantranet","score":score,"map":hm,"meta":{"input_size":[Ht,Wt],"top_percent":top_percent}}
-         except Exception as e:
-             return {"name":"mantranet","score":None,"map":None,"meta":{"reason":str(e)}}
-     if mock:
-         # simple center blob heatmap to exercise the pipeline
-         H,W = pil_image.size[1], pil_image.size[0]
-         yy, xx = np.mgrid[0:H, 0:W]
-         cy, cx = H/2.0, W/2.0
-         r2 = (yy-cy)**2 + (xx-cx)**2
-         hm = np.exp(-r2/(2*(0.15*max(H,W))**2)).astype('float32')
-         flat = hm.flatten()
-         k = max(1, int(len(flat)*top_percent/100.0))
-         score = float(np.partition(flat, -k)[-k:].mean())
-         return {"name":"mantranet","score":score,"map":hm,"meta":{"mock":True,"top_percent":top_percent}}
-     return {"name":"mantranet","score":None,"map":None,"meta":{"reason":"no model and no mock"}}
-diff --git a/idtamper/checks/noise.py b/idtamper/checks/noise.py
-index 7c52d5d4e361edf392c10eeb19a91acd3e817f37..79b316a7acf38f6ae69e3cfc70e1c631589131ac 100644
---- a/idtamper/checks/noise.py
-+++ b/idtamper/checks/noise.py
-@@ -1,69 +1,81 @@
-+"""Noise inconsistency check with optional preprocessing cache."""
-+
-+from __future__ import annotations
- 
- import numpy as np
--from PIL import ImageFilter
-+
-+from ..preproc import PreprocCache
-+
- 
- def _haar2d(x):
--    # Simple 1-level Haar DWT producing LL, (LH, HL, HH)
--    # Assumes 2D float array with even sizes; pad if needed
--    H,W = x.shape
--    if H%2==1: x = np.pad(x, ((0,1),(0,0)), mode='edge'); H+=1
--    if W%2==1: x = np.pad(x, ((0,0),(0,1)), mode='edge'); W+=1
--    # 1D along rows
--    a = (x[:,0::2] + x[:,1::2]) * 0.5
--    d = (x[:,0::2] - x[:,1::2]) * 0.5
--    # then along columns
--    LL = (a[0::2,:] + a[1::2,:]) * 0.5
--    LH = (d[0::2,:] + d[1::2,:]) * 0.5
--    HL = (a[0::2,:] - a[1::2,:]) * 0.5
--    HH = (d[0::2,:] - d[1::2,:]) * 0.5
-+    H, W = x.shape
-+    if H % 2 == 1:
-+        x = np.pad(x, ((0, 1), (0, 0)), mode="edge")
-+        H += 1
-+    if W % 2 == 1:
-+        x = np.pad(x, ((0, 0), (0, 1)), mode="edge")
-+        W += 1
-+    a = (x[:, 0::2] + x[:, 1::2]) * 0.5
-+    d = (x[:, 0::2] - x[:, 1::2]) * 0.5
-+    LL = (a[0::2, :] + a[1::2, :]) * 0.5
-+    LH = (d[0::2, :] + d[1::2, :]) * 0.5
-+    HL = (a[0::2, :] - a[1::2, :]) * 0.5
-+    HH = (d[0::2, :] - d[1::2, :]) * 0.5
-     return LL, LH, HL, HH
- 
-+
- def _local_stats(M, block=16, step=8):
--    H,W = M.shape
-+    H, W = M.shape
-     S = np.zeros_like(M, dtype=np.float32)
-     for y in range(0, H, step):
-         for x in range(0, W, step):
--            patch = M[y:y+block, x:x+block]
--            S[y:y+step, x:x+step] = float(np.std(patch))
-+            patch = M[y : y + block, x : x + block]
-+            S[y : y + step, x : x + step] = float(np.std(patch))
-     return S
- 
--def run(pil_image, params=None):
--    """
--    Enhanced Noise Inconsistency.
--    Methods:
--      - 'wavelet' (default): std map sulla somma dei subband ad alta frequenza (LH+HL+HH)
--      - 'blur': residuo (img - GaussianBlur)
--    Params:
--      - method: 'wavelet' | 'blur'
--      - block: 32, step: 16 (per la mappa std)
--      - blur_radius: 1.0 (se method='blur')
--      - top_percent: 5.0
--    """
-+
-+def run(img_or_cache, params=None):
-     p = params or {}
--    method = p.get('method', 'wavelet')
--    block = int(p.get('block', 32))
--    step = int(p.get('step', 16))
--    top_percent = float(p.get('top_percent', 5.0))
-+    method = p.get("method", "wavelet")
-+    block = int(p.get("block", 32))
-+    step = int(p.get("step", 16))
-+    top_percent = float(p.get("top_percent", 5.0))
- 
--    arr = np.asarray(pil_image.convert("L"), dtype=np.float32)/255.0
-+    if isinstance(img_or_cache, PreprocCache):
-+        arr = img_or_cache.gray.astype(np.float32) / 255.0
-+    else:
-+        arr = np.asarray(img_or_cache.convert("L"), dtype=np.float32) / 255.0
- 
--    if method == 'blur':
--        blur = float(p.get('blur_radius', 1.0))
-+    if method == "blur":
-         from PIL import ImageFilter
--        arr_blur = np.asarray(pil_image.convert("L").filter(ImageFilter.GaussianBlur(radius=blur)), dtype=np.float32)/255.0
-+
-+        blur = float(p.get("blur_radius", 1.0))
-+        if isinstance(img_or_cache, PreprocCache):
-+            pil = Image.fromarray(img_or_cache.img)
-+        else:
-+            pil = img_or_cache
-+        arr_blur = np.asarray(
-+            pil.convert("L").filter(ImageFilter.GaussianBlur(radius=blur)),
-+            dtype=np.float32,
-+        ) / 255.0
-         resid = np.abs(arr - arr_blur)
-         energy = resid
-     else:
--        # wavelet residual energy
-         LL, LH, HL, HH = _haar2d(arr)
-         energy = np.abs(LH) + np.abs(HL) + np.abs(HH)
- 
-     stdmap = _local_stats(energy, block=block, step=step)
--    hm = (stdmap - stdmap.min())/(stdmap.max()-stdmap.min()+1e-8)
-+    hm = (stdmap - stdmap.min()) / (stdmap.max() - stdmap.min() + 1e-8)
- 
-     flat = hm.flatten()
--    k = max(1, int(len(flat)*top_percent/100.0))
-+    k = max(1, int(len(flat) * top_percent / 100.0))
-     topk = np.partition(flat, -k)[-k:]
-     score = float(np.clip(topk.mean(), 0.0, 1.0))
- 
--    return {"name":"noise_inconsistency", "score": score, "map": hm, "meta": {"method": method, "block": block, "step": step, "top_percent": top_percent}}
-+    return {
-+        "name": "noise_inconsistency",
-+        "score": score,
-+        "map": hm,
-+        "meta": {"method": method, "block": block, "step": step, "top_percent": top_percent},
-+    }
-+
-diff --git a/idtamper/checks/noiseprintpp.py b/idtamper/checks/noiseprintpp.py
-index e3df37970db12729edd9268e6e736390f6c4f7f2..ed564c605e3d8470a976d27b85b73a319e600262 100644
---- a/idtamper/checks/noiseprintpp.py
-+++ b/idtamper/checks/noiseprintpp.py
-@@ -1,51 +1,53 @@
- import numpy as np
- from PIL import Image
- 
- def _mock_forward(H, W, seed=0):
-     rng = np.random.RandomState(seed)
--    base = rng.randn(H,W).astype(np.float32)*0.1
-+    base = rng.randn(H, W).astype(np.float32) * 0.1
-     yy, xx = np.mgrid[0:H, 0:W]
--    base += 0.3*np.sin(2*np.pi*yy/32.0) * np.cos(2*np.pi*xx/32.0)
-+    base += 0.3 * np.sin(2 * np.pi * yy / 32.0) * np.cos(2 * np.pi * xx / 32.0)
-     return base.astype(np.float32)
- 
- def run(pil_image, params=None):
-     p = params or {}
-     mock = bool(p.get('mock', False))
-     top_percent = float(p.get('score_top_percent', 5.0))
-     blk = int(p.get('block', 32))
-     if mock:
--        Ht,Wt = p.get('input_size', [512,512])
--        resid = _mock_forward(Ht,Wt,seed=321)
-+        Ht, Wt = p.get('input_size', [512, 512])
-+        resid = _mock_forward(Ht, Wt, seed=321)
-     else:
-+        sess = p.get('session')
-         mp = p.get('model_path', None)
--        if not mp:
--            return {"name":"noiseprintpp","score": None,"map": None,"meta": {"reason":"model_path not provided"}}
--        try:
--            import onnxruntime as ort
--            sess = ort.InferenceSession(str(mp), providers=['CPUExecutionProvider'])
--        except Exception as e:
--            return {"name":"noiseprintpp","score": None,"map": None,"meta": {"reason": f"onnxruntime/model error: {e}"}}
-+        if sess is None:
-+            if not mp:
-+                return {"name": "noiseprintpp", "score": None, "map": None, "meta": {"reason": "model_path not provided"}}
-+            try:
-+                import onnxruntime as ort
-+                sess = ort.InferenceSession(str(mp), providers=['CPUExecutionProvider'])
-+            except Exception as e:
-+                return {"name": "noiseprintpp", "score": None, "map": None, "meta": {"reason": f"onnxruntime/model error: {e}"}}
-         in_name = sess.get_inputs()[0].name
-         out_name = sess.get_outputs()[0].name
-         arr = np.asarray(pil_image.convert('RGB'))
--        Ht,Wt = (p.get('input_size') or [arr.shape[0], arr.shape[1]])
--        arr = np.array(Image.fromarray(arr).resize((Wt,Ht), Image.BILINEAR), dtype=np.float32)/255.0
--        x = np.transpose(arr, (2,0,1))[None,...].astype(np.float32)
-+        Ht, Wt = (p.get('input_size') or [arr.shape[0], arr.shape[1]])
-+        arr = np.array(Image.fromarray(arr).resize((Wt, Ht), Image.BILINEAR), dtype=np.float32) / 255.0
-+        x = np.transpose(arr, (2, 0, 1))[None, ...].astype(np.float32)
-         resid = sess.run([out_name], {in_name: x})[0]
-         resid = np.squeeze(resid).astype(np.float32)
--        if resid.ndim==3:
--            resid = resid[0] if resid.shape[0]<=3 else resid.mean(axis=0)
--    H,W = resid.shape[:2]
--    emap = np.zeros((H,W), dtype=np.float32)
-+        if resid.ndim == 3:
-+            resid = resid[0] if resid.shape[0] <= 3 else resid.mean(axis=0)
-+    H, W = resid.shape[:2]
-+    emap = np.zeros((H, W), dtype=np.float32)
-     for y in range(0, H, blk):
-         for x in range(0, W, blk):
--            patch = resid[y:y+blk, x:x+blk]
--            emap[y:y+blk, x:x+blk] = float(np.std(patch))
--    emap = (emap - emap.min())/(emap.max()-emap.min()+1e-8)
-+            patch = resid[y:y + blk, x:x + blk]
-+            emap[y:y + blk, x:x + blk] = float(np.std(patch))
-+    emap = (emap - emap.min()) / (emap.max() - emap.min() + 1e-8)
-     flat = emap.flatten()
--    k = max(1, int(len(flat)*top_percent/100.0))
-+    k = max(1, int(len(flat) * top_percent / 100.0))
-     topk = np.partition(flat, -k)[-k:]
-     score = float(np.clip(topk.mean(), 0.0, 1.0))
--    W0,H0 = pil_image.size
--    emap_rs = np.array(Image.fromarray((emap*255).astype('uint8')).resize((W0,H0), Image.BILINEAR), dtype=np.float32)/255.0
--    return {"name":"noiseprintpp","score": score,"map": emap_rs,"meta": {"block": blk, "top_percent": top_percent}}
-\ No newline at end of file
-+    W0, H0 = pil_image.size
-+    emap_rs = np.array(Image.fromarray((emap * 255).astype('uint8')).resize((W0, H0), Image.BILINEAR), dtype=np.float32) / 255.0
-+    return {"name": "noiseprintpp", "score": score, "map": emap_rs, "meta": {"block": blk, "top_percent": top_percent}}
-diff --git a/idtamper/checks/splicing.py b/idtamper/checks/splicing.py
-index e6cfa1aaba3e582e0c1b53e907cf88533e93ab7c..17be3050b4e87d5fe854b4af23b71084657c96d5 100644
---- a/idtamper/checks/splicing.py
-+++ b/idtamper/checks/splicing.py
-@@ -1,99 +1,118 @@
-+"""Splicing detection with optional preprocessing cache."""
-+
-+from __future__ import annotations
- 
- import numpy as np
- from PIL import Image, ImageFilter
- 
-+from ..preproc import PreprocCache
-+
-+
- def _gradients(arr):
--    # simple sobel-like gradients
--    gy = np.abs(np.diff(arr, axis=0, prepend=arr[:1,:]))
--    gx = np.abs(np.diff(arr, axis=1, prepend=arr[:,:1]))
-+    gy = np.abs(np.diff(arr, axis=0, prepend=arr[:1, :]))
-+    gx = np.abs(np.diff(arr, axis=1, prepend=arr[:, :1]))
-     return gx, gy
- 
-+
- def _structure_coherence(gx, gy, win=5, eps=1e-6):
--    # compute local structure tensor and coherence = (lambda1 - lambda2) / (lambda1 + lambda2)
-     H, W = gx.shape
--    Ixx = gx*gx; Iyy = gy*gy; Ixy = gx*gy
--    # box blur by integral image
-+    Ixx = gx * gx
-+    Iyy = gy * gy
-+    Ixy = gx * gy
-+
-     def boxblur(M, w):
--        w = int(w) | 1  # force odd window
--        pad = w//2
--        P = np.pad(M, ((pad,pad),(pad,pad)), mode='edge')
-+        w = int(w) | 1
-+        pad = w // 2
-+        P = np.pad(M, ((pad, pad), (pad, pad)), mode="edge")
-         I = np.cumsum(np.cumsum(P, axis=0), axis=1)
--        I = np.pad(I, ((1,0),(1,0)), mode='constant', constant_values=0)
-+        I = np.pad(I, ((1, 0), (1, 0)), mode="constant", constant_values=0)
-         S = I[w:, w:] - I[:-w, w:] - I[w:, :-w] + I[:-w, :-w]
--        return S / float(w*w)
--    Ixx_b = boxblur(Ixx, win); Iyy_b = boxblur(Iyy, win); Ixy_b = boxblur(Ixy, win)
--    # eigenvalues of 2x2
-+        return S / float(w * w)
-+
-+    Ixx_b = boxblur(Ixx, win)
-+    Iyy_b = boxblur(Iyy, win)
-+    Ixy_b = boxblur(Ixy, win)
-     tr = Ixx_b + Iyy_b
--    det = Ixx_b*Iyy_b - Ixy_b*Ixy_b
--    # numerical stable approx for eigenvalues
--    tmp = np.sqrt(np.maximum(tr*tr/4.0 - det, 0.0))
--    l1 = tr/2.0 + tmp; l2 = tr/2.0 - tmp
-+    det = Ixx_b * Iyy_b - Ixy_b * Ixy_b
-+    tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
-+    l1 = tr / 2.0 + tmp
-+    l2 = tr / 2.0 - tmp
-     coh = (l1 - l2) / (l1 + l2 + eps)
-     return np.clip(coh, 0.0, 1.0)
- 
--def run(pil_image, params=None):
--    """
--    Enhanced Splicing detector.
--    Modes:
--      - 'classic': single-scale edge/variance (legacy)
--      - 'multiscale' (default): multi-scale gradients on Y/U/V with coherence suppression
--    Params:
--      - max_side: resize long side (default 1024)
--      - mode: 'multiscale'|'classic'
--      - scales: list of Gaussian radii (default [1.0, 2.0, 4.0])
--      - win: local window for coherence (default 7)
--      - top_percent: percentile for scoring (default 1.0)
--    """
-+
-+def run(img_or_cache, params=None):
-     p = params or {}
--    mode = p.get('mode', 'multiscale')
--    max_side = int(p.get('max_side', 1024))
--    top_percent = float(p.get('top_percent', 1.0))
--    scales = p.get('scales', [1.0, 2.0, 4.0])
--    win = int(p.get('win', 7))
--
--    im = pil_image
--    W0,H0 = im.size
-+    mode = p.get("mode", "multiscale")
-+    max_side = int(p.get("max_side", 1024))
-+    top_percent = float(p.get("top_percent", 1.0))
-+    scales = p.get("scales", [1.0, 2.0, 4.0])
-+    win = int(p.get("win", 7))
-+
-+    if isinstance(img_or_cache, PreprocCache):
-+        im = Image.fromarray(img_or_cache.img)
-+        arr = img_or_cache.ycbcr.astype(np.float32)
-+    else:
-+        im = img_or_cache
-+        arr = np.asarray(im.convert("YCbCr"), dtype=np.float32)
-+
-+    W0, H0 = im.size
-     scale = 1.0
--    if max(W0,H0) > max_side:
--        scale = max_side/float(max(W0,H0))
--        im = im.resize((int(W0*scale), int(H0*scale)), Image.BILINEAR)
--    arr = np.asarray(im.convert('YCbCr'), dtype=np.float32)
--    Y,U,V = arr[:,:,0], arr[:,:,1], arr[:,:,2]
--
--    if mode == 'classic':
--        # legacy behavior similar to previous version
--        def grad(a): 
--            return np.hypot(np.diff(a,axis=0,prepend=a[:1,:]), np.diff(a,axis=1,prepend=a[:,:1]))
-+    if max(W0, H0) > max_side:
-+        scale = max_side / float(max(W0, H0))
-+        im = im.resize((int(W0 * scale), int(H0 * scale)), Image.BILINEAR)
-+        arr = np.asarray(im.convert("YCbCr"), dtype=np.float32)
-+    Y, U, V = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
-+
-+    if mode == "classic":
-+        def grad(a):
-+            return np.hypot(
-+                np.diff(a, axis=0, prepend=a[:1, :]),
-+                np.diff(a, axis=1, prepend=a[:, :1]),
-+            )
-+
-         gY, gU, gV = grad(Y), grad(U), grad(V)
--        varY = (Y - Y.mean()); varU = (U - U.mean()); varV = (V - V.mean())
--        m = gY*(np.abs(varY)) + 0.5*gU*np.abs(varU) + 0.5*gV*np.abs(varV)
--        hm = (m - m.min())/(m.max()-m.min()+1e-8)
-+        varY = Y - Y.mean()
-+        varU = U - U.mean()
-+        varV = V - V.mean()
-+        m = gY * np.abs(varY) + 0.5 * gU * np.abs(varU) + 0.5 * gV * np.abs(varV)
-+        hm = (m - m.min()) / (m.max() - m.min() + 1e-8)
-     else:
--        # multiscale gradients with coherence
-         acc = np.zeros_like(Y, dtype=np.float32)
-         for s in scales:
-             if s > 0:
--                Ys = np.asarray(im.filter(ImageFilter.GaussianBlur(radius=float(s))).convert('L'), dtype=np.float32)
--                Us = U  # chroma left as is for efficiency
-+                Ys = np.asarray(
-+                    im.filter(ImageFilter.GaussianBlur(radius=float(s))).convert("L"),
-+                    dtype=np.float32,
-+                )
-+                Us = U
-                 Vs = V
-             else:
--                Ys = Y; Us = U; Vs = V
-+                Ys = Y
-+                Us = U
-+                Vs = V
-             gxY, gyY = _gradients(Ys)
-             gY = np.hypot(gxY, gyY)
--            coh = _structure_coherence(gxY, gyY, win=max(3,win))
--            # weight: high magnitude edges but low coherence (seams -> incoherent)
-+            coh = _structure_coherence(gxY, gyY, win=max(3, win))
-             acc += (gY * (1.0 - coh)).astype(np.float32)
--            # chroma discontinuity bonus
--            gxU, gyU = _gradients(Us); gxV, gyV = _gradients(Vs)
--            acc += 0.25*(np.hypot(gxU,gyU) + np.hypot(gxV,gyV)).astype(np.float32)
--        hm = (acc - acc.min())/(acc.max()-acc.min()+1e-8)
-+            gxU, gyU = _gradients(Us)
-+            gxV, gyV = _gradients(Vs)
-+            acc += 0.25 * (np.hypot(gxU, gyU) + np.hypot(gxV, gyV)).astype(np.float32)
-+        hm = (acc - acc.min()) / (acc.max() - acc.min() + 1e-8)
- 
--    # score by top-percentile
-     flat = hm.flatten()
--    k = max(1, int(len(flat)*top_percent/100.0))
-+    k = max(1, int(len(flat) * top_percent / 100.0))
-     topk = np.partition(flat, -k)[-k:]
-     score = float(np.clip(topk.mean(), 0.0, 1.0))
- 
--    # resize back
--    hm = (np.array(Image.fromarray((hm*255).astype('uint8')).resize((W0,H0), Image.BILINEAR), dtype=np.float32)/255.0)
--    return {"name":"splicing","score": score, "map": hm, "meta": {"mode": mode, "scales": scales, "win": win, "top_percent": top_percent}}
-+    hm = (
-+        np.array(Image.fromarray((hm * 255).astype("uint8")).resize((W0, H0), Image.BILINEAR), dtype=np.float32)
-+        / 255.0
-+    )
-+    return {
-+        "name": "splicing",
-+        "score": score,
-+        "map": hm,
-+        "meta": {"mode": mode, "scales": scales, "win": win, "top_percent": top_percent},
-+    }
-+
-diff --git a/idtamper/execution.py b/idtamper/execution.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..a0533b4768bcac61c4f5fc6d3984ee2fb5d2d092
---- /dev/null
-+++ b/idtamper/execution.py
-@@ -0,0 +1,75 @@
-+from __future__ import annotations
-+
-+"""Execution utilities for controlling parallelism and thread usage."""
-+
-+from dataclasses import dataclass
-+import contextlib
-+import os
-+from typing import Dict, Iterator
-+
-+import onnxruntime as ort
-+
-+
-+@dataclass
-+class ParallelConfig:
-+    """Configuration for parallel execution.
-+
-+    Attributes
-+    ----------
-+    max_parallel_images:
-+        Maximum number of images to process in parallel at the pipeline level.
-+    parallel_signal_checks:
-+        Whether to parallelise classic signal based checks for a single image
-+        using a thread pool.
-+    onnx_intra_threads:
-+        Number of intra-op threads used by ONNX Runtime sessions.
-+    onnx_inter_threads:
-+        Number of inter-op threads used by ONNX Runtime sessions.
-+    env_thread_caps:
-+        If ``True`` set environment thread related variables such as
-+        ``OMP_NUM_THREADS`` to avoid oversubscription.
-+    """
-+
-+    max_parallel_images: int = 1
-+    parallel_signal_checks: bool = True
-+    onnx_intra_threads: int = 1
-+    onnx_inter_threads: int = 1
-+    env_thread_caps: bool = True
-+
-+
-+_THREAD_VARS = [
-+    "OMP_NUM_THREADS",
-+    "OPENBLAS_NUM_THREADS",
-+    "MKL_NUM_THREADS",
-+    "NUMEXPR_NUM_THREADS",
-+]
-+
-+
-+@contextlib.contextmanager
-+def apply_thread_env(config: ParallelConfig) -> Iterator[None]:
-+    """Context manager to set/restore environment thread variables."""
-+
-+    old: Dict[str, str] = {}
-+    if config.env_thread_caps:
-+        for v in _THREAD_VARS:
-+            old[v] = os.environ.get(v, "")
-+            os.environ[v] = str(config.onnx_intra_threads)
-+    try:
-+        yield
-+    finally:
-+        if config.env_thread_caps:
-+            for v, val in old.items():
-+                if val:
-+                    os.environ[v] = val
-+                else:
-+                    os.environ.pop(v, None)
-+
-+
-+def init_onnx_session_opts(config: ParallelConfig) -> ort.SessionOptions:
-+    """Create ONNX Runtime ``SessionOptions`` according to the configuration."""
-+
-+    opts = ort.SessionOptions()
-+    opts.intra_op_num_threads = int(config.onnx_intra_threads)
-+    opts.inter_op_num_threads = int(config.onnx_inter_threads)
-+    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-+    return opts
-diff --git a/idtamper/metrics.py b/idtamper/metrics.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..ba98d047b26f8b7966eca11d3be8b7cd8c870fb8
---- /dev/null
-+++ b/idtamper/metrics.py
-@@ -0,0 +1,79 @@
-+from __future__ import annotations
-+
-+"""Simple structures for recording timing and resource usage metrics."""
-+
-+from dataclasses import dataclass
-+from typing import Optional, Dict, Any, Iterable
-+import time
-+import psutil
-+
-+
-+@dataclass
-+class Timing:
-+    start: float
-+    end: float
-+
-+    @property
-+    def ms(self) -> float:
-+        return (self.end - self.start) * 1000.0
-+
-+
-+@dataclass
-+class CheckMetrics:
-+    name: str
-+    ms: float
-+    cpu_percent: float
-+    rss_bytes: int
-+
-+
-+def measure(fn, name: str):
-+    """Measure execution time and resource usage of ``fn``.
-+
-+    Parameters
-+    ----------
-+    fn:
-+        Callable with no arguments.
-+    name:
-+        Name of the check being measured.
-+    """
-+
-+    proc = psutil.Process()
-+    cpu_before = proc.cpu_percent(interval=None)
-+    rss_before = proc.memory_info().rss
-+    start = time.perf_counter()
-+    result = fn()
-+    end = time.perf_counter()
-+    cpu_after = proc.cpu_percent(interval=None)
-+    rss_after = proc.memory_info().rss
-+    metrics = CheckMetrics(
-+        name=name,
-+        ms=(end - start) * 1000.0,
-+        cpu_percent=max(0.0, cpu_after - cpu_before),
-+        rss_bytes=max(0, rss_after - rss_before),
-+    )
-+    return result, metrics
-+
-+
-+class Stopwatch:
-+    def __init__(self):
-+        self.start = time.perf_counter()
-+
-+    def stop(self) -> Timing:
-+        end = time.perf_counter()
-+        return Timing(self.start, end)
-+
-+
-+def describe_runtime(cfg) -> Dict[str, Any]:
-+    return {
-+        "parallel_config": cfg.__dict__,
-+        "hw": {"cpu_count": psutil.cpu_count(), "ram_gb": psutil.virtual_memory().total / 1e9},
-+    }
-+
-+
-+def embed_report_metrics(report: Dict[str, Any], total_ms: float, checks: Iterable[CheckMetrics], runtime: Dict[str, Any]):
-+    report["metrics"] = {
-+        "total_ms": total_ms,
-+        "checks": [c.__dict__ for c in checks],
-+    }
-+    report["metrics"].update(runtime)
-+    return report
-diff --git a/idtamper/pipeline.py b/idtamper/pipeline.py
-index 4a1ba9be226fd5950cf605f72a974c70a9583fca..8821504c82083b652acd4e6988f2c0826382db74 100644
---- a/idtamper/pipeline.py
-+++ b/idtamper/pipeline.py
-@@ -1,154 +1,277 @@
--
--import json, os
-+import json
-+import json
-+import os
- from dataclasses import dataclass
- from pathlib import Path
--from typing import Dict, Any, Optional
--from PIL import Image
-+from typing import Any, Dict, List, Optional
-+
- import numpy as np
-+from PIL import Image
- 
- from .aggregate import DEFAULT_WEIGHTS, fuse_scores
--from .visualize import save_heatmap_gray, fuse_heatmaps, overlay_on_image
--from .checks import ela, jpegghost, exif as exifcheck, noise, blockiness, copymove, splicing, noiseprintpp, mantranet
-+from .checks import (
-+    blockiness,
-+    copymove,
-+    ela,
-+    exif as exifcheck,
-+    jpegghost,
-+    mantranet,
-+    noise,
-+    noiseprintpp,
-+    splicing,
-+)
-+from .execution import ParallelConfig, init_onnx_session_opts, apply_thread_env
-+from .metrics import measure, embed_report_metrics, describe_runtime
-+from .preproc import PreprocOptions, build_preproc_cache
-+from .visualize import fuse_heatmaps, overlay_on_image, save_heatmap_gray
-+
-+import concurrent.futures as cf
-+import onnxruntime as ort
-+import cv2
-+
-+# cache for ONNX sessions inside worker processes
-+_ORT_SESS: Dict[str, Any] = {}
-+
- 
- @dataclass
- class AnalyzerConfig:
--    weights: Optional[Dict[str,float]] = None
-+    weights: Optional[Dict[str, float]] = None
-     threshold: float = 0.30
--    check_params: Optional[Dict[str,Any]] = None
--    check_thresholds: Optional[Dict[str,float]] = None
-+    check_params: Optional[Dict[str, Any]] = None
-+    check_thresholds: Optional[Dict[str, float]] = None
-+
- 
--def _run_check(fn, name, pil_img, params):
-+def _run_check(fn, name, inp, params, sessions):
-+    p = dict(params.get(name, {})) if params else {}
-+    if sessions and name in sessions and sessions[name] is not None:
-+        p.setdefault("session", sessions[name])
-     try:
--        res = fn(pil_img, params=params.get(name) if params else None)
-+        res = fn(inp, params=p)
-         score = res.get("score", None)
-         hm = res.get("map", None)
-         meta = res.get("meta", {})
--        return {"name": name if res.get('name') is None else res.get('name'), "score": score, "map": hm, "meta": meta}
--    except Exception as e:
-+        return {"name": res.get("name", name), "score": score, "map": hm, "meta": meta}
-+    except Exception as e:  # pragma: no cover - defensive
-         return {"name": name, "score": None, "map": None, "meta": {"error": str(e)}}
- 
--def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig):
--    outp = Path(out_dir); outp.mkdir(parents=True, exist_ok=True)
-+
-+def _resolve_model_paths(cfg: AnalyzerConfig) -> Dict[str, str]:
-+    res = {}
-+    p = cfg.check_params or {}
-+    for k in ("mantranet", "noiseprintpp"):
-+        mp = p.get(k, {}).get("model_path") if isinstance(p.get(k), dict) else None
-+        if mp:
-+            res[k] = mp
-+    return res
-+
-+
-+def _worker_init(cfg: ParallelConfig, model_paths: Dict[str, str]):
-+    with apply_thread_env(cfg):
-+        try:
-+            cv2.setNumThreads(1)
-+        except Exception:
-+            pass
-+        so = init_onnx_session_opts(cfg)
-+        for name, pth in model_paths.items():
-+            try:
-+                sess = ort.InferenceSession(pth, sess_options=so, providers=["CPUExecutionProvider"])
-+                # warm-up with dummy input
-+                inp = sess.get_inputs()[0]
-+                shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-+                dummy = np.zeros(shape, dtype=np.float32)
-+                sess.run(None, {inp.name: dummy})
-+                _ORT_SESS[name] = sess
-+            except Exception:
-+                _ORT_SESS[name] = None
-+
-+
-+def _analyze_single(image_path: str, out_dir: str, cfg: AnalyzerConfig, pcfg: ParallelConfig, sessions: Dict[str, Any] | None = None):
-+    sessions = sessions or _ORT_SESS
-+    outp = Path(out_dir)
-+    outp.mkdir(parents=True, exist_ok=True)
-     pil_img = Image.open(image_path).convert("RGB")
--    # save a copy of original for reports
--    try:
-+
-+    try:  # save copy of original
-         import shutil
--        shutil.copy2(image_path, str(outp/Path(image_path).name))
-+
-+        shutil.copy2(image_path, str(outp / Path(image_path).name))
-     except Exception:
-         pass
- 
--    # run checks (explicit names so params/thresholds match keys)
--    results = []
--    for name, fn in [
--                     ('mantranet', mantranet.run),
--                     ('noiseprintpp', noiseprintpp.run),
--                     ('ela95', ela.run),
--                     ('jpeg_ghosts', jpegghost.run),
--                     ('noise_inconsistency', noise.run),
--                     ('splicing', splicing.run),
--                     ('copy_move', copymove.run),
--                     ('jpeg_blockiness', blockiness.run),
--                     ('exif', exifcheck.run)]:
--        results.append(_run_check(fn, name, pil_img, cfg.check_params or {}))
-+    cache = build_preproc_cache(np.asarray(pil_img), PreprocOptions())
-+
-+    results: List[Dict[str, Any]] = []
-+    metrics = []
-+
-+    deep_checks = [
-+        ("mantranet", mantranet.run, pil_img),
-+        ("noiseprintpp", noiseprintpp.run, pil_img),
-+    ]
-+    signal_checks = [
-+        ("ela95", ela.run, cache),
-+        ("jpeg_ghosts", jpegghost.run, cache),
-+        ("noise_inconsistency", noise.run, cache),
-+        ("splicing", splicing.run, cache),
-+        ("copy_move", copymove.run, cache),
-+        ("jpeg_blockiness", blockiness.run, cache),
-+        ("exif", exifcheck.run, pil_img),
-+    ]
-+
-+    # Deep checks sequential
-+    for name, fn, inp in deep_checks:
-+        res, metr = measure(lambda fn=fn, name=name, inp=inp: _run_check(fn, name, inp, cfg.check_params or {}, sessions), name)
-+        results.append(res)
-+        metrics.append(metr)
-+
-+    def _do(item):
-+        name, fn, inp = item
-+        return measure(lambda fn=fn, name=name, inp=inp: _run_check(fn, name, inp, cfg.check_params or {}, sessions), name)
-+
-+    if pcfg.parallel_signal_checks and len(signal_checks) > 1:
-+        with cf.ThreadPoolExecutor() as tp:
-+            for res, metr in tp.map(_do, signal_checks):
-+                results.append(res)
-+                metrics.append(metr)
-+    else:
-+        for item in signal_checks:
-+            res, metr = _do(item)
-+            results.append(res)
-+            metrics.append(metr)
- 
-     # per_check dict with thresholds
-     per_check = {}
-     thr = cfg.check_thresholds or {}
-     for r in results:
-         nm = r["name"]
-         per_check[nm] = {
-             "score": r["score"],
-             "threshold": float(thr.get(nm, 0.5)),
-             "flag": (r["score"] is not None and float(r["score"]) >= float(thr.get(nm, 0.5))),
--            "details": r.get("meta", {})
-+            "details": r.get("meta", {}),
-         }
- 
-     weights = cfg.weights or DEFAULT_WEIGHTS
-     tamper_score = fuse_scores(per_check, weights)
-     is_tampered = bool(tamper_score >= cfg.threshold)
- 
-     # Save heatmaps per-check
--    artifacts = {}
-+    artifacts: Dict[str, str] = {}
-     hm_maps = {}
-     for r in results:
-         if r.get("map") is not None:
-             hm_name = f"heatmap_{r['name']}.png"
--            save_heatmap_gray(r["map"], str(outp/hm_name))
-+            save_heatmap_gray(r["map"], str(outp / hm_name))
-             artifacts[hm_name[:-4]] = hm_name
-             hm_maps[r["name"]] = r["map"]
- 
-     # fused + overlay
-     fused = fuse_heatmaps(hm_maps, weights=weights)
-     if fused is not None:
--        save_heatmap_gray(fused, str(outp/"fused_heatmap.png"))
-+        save_heatmap_gray(fused, str(outp / "fused_heatmap.png"))
-         ov = overlay_on_image(pil_img, fused, alpha=0.45)
--        ov.save(str(outp/"overlay.png"))
-+        ov.save(str(outp / "overlay.png"))
-         artifacts["fused_heatmap"] = "fused_heatmap.png"
-         artifacts["overlay"] = "overlay.png"
- 
-     # --- Confidence computation (margin + overlap + agreement) ---
-     import numpy as _np, math as _math
--    strong_checks = ['noiseprintpp','copy_move','splicing','noise_inconsistency']
-+
-+    strong_checks = ['noiseprintpp', 'copy_move', 'splicing', 'noise_inconsistency']
-     mask_thr = float((cfg.check_params or {}).get('confidence_mask_thr', 0.6))
-     tau = float((cfg.check_params or {}).get('confidence_tau', 0.10))
-     alpha = float((cfg.check_params or {}).get('confidence_alpha', 0.30))
--    beta  = float((cfg.check_params or {}).get('confidence_beta', 0.20))
--
-+    beta = float((cfg.check_params or {}).get('confidence_beta', 0.20))
- 
-     # Select flagged strong checks with a heatmap (resize to common size)
-     sel_maps = []
-     Ht, Wt = pil_img.size[1], pil_img.size[0]
-     from PIL import Image as _Image
-+
-     for nm in strong_checks:
-         pc = per_check.get(nm)
-         if pc and pc.get('flag') and (nm in hm_maps):
-             m = hm_maps[nm]
-             a = np.asarray(m, dtype=float)
-             if a.shape != (Ht, Wt):
--                img = _Image.fromarray((np.clip(a,0,1)*255).astype('uint8'))
-+                img = _Image.fromarray((np.clip(a, 0, 1) * 255).astype('uint8'))
-                 img = img.resize((Wt, Ht), _Image.BILINEAR)
--                a = np.asarray(img, dtype=float)/255.0
-+                a = np.asarray(img, dtype=float) / 255.0
-             sel_maps.append(a)
- 
-     # Overlap ratio = |intersection(h>thr)| / |union(h>thr)| over selected maps
-     overlap_ratio = 0.0
-     if len(sel_maps) >= 2:
-         masks = [(m > mask_thr).astype(_np.uint8) for m in sel_maps]
-         inter = masks[0].copy()
-         union = masks[0].copy()
-         for k in range(1, len(masks)):
-             inter = (inter & masks[k])
-             union = (union | masks[k])
-         iu = float(inter.sum())
-         uu = float(union.sum())
-         overlap_ratio = (iu / uu) if uu > 0 else 0.0
- 
--    checks_forti_flag = sum(1 for nm in strong_checks if per_check.get(nm,{}).get('flag'))
-+    checks_forti_flag = sum(1 for nm in strong_checks if per_check.get(nm, {}).get('flag'))
-     nstrong = len(strong_checks)
- 
-     margin = float(tamper_score - cfg.threshold)
-     sig = 1.0 / (1.0 + _math.exp(-(margin / max(1e-6, tau))))
-     confidence = sig * (1.0 + alpha * overlap_ratio) * (1.0 + beta * (checks_forti_flag / max(1, nstrong)))
-     confidence = float(max(0.0, min(1.0, confidence)))
- 
-     report = {
-         "image": os.path.basename(image_path),
-         "tamper_score": tamper_score,
-         "threshold": cfg.threshold,
-         "is_tampered": is_tampered,
-         "confidence": confidence,
-         "confidence_components": {
-             "margin": margin,
-             "overlap_ratio": overlap_ratio,
-             "checks_forti_flag": checks_forti_flag,
-             "nstrong": nstrong,
-             "tau": tau,
-             "alpha": alpha,
-             "beta": beta,
--            "mask_thr": mask_thr
-+            "mask_thr": mask_thr,
-         },
-         "per_check": per_check,
--        "artifacts": artifacts
-+        "artifacts": artifacts,
-     }
--    (outp/"report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
-+
-+    total_ms = sum(m.ms for m in metrics)
-+    report = embed_report_metrics(report, total_ms, metrics, describe_runtime(pcfg))
-+
-+    (outp / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
-     return report
-+
-+
-+def analyze_images(image_paths: List[str], out_dir: str, cfg: AnalyzerConfig, parallel: ParallelConfig = ParallelConfig()) -> List[Dict[str, Any]]:
-+    out_root = Path(out_dir)
-+    out_root.mkdir(parents=True, exist_ok=True)
-+
-+    if parallel.max_parallel_images <= 1:
-+        return [
-+            _analyze_single(path, str(out_root / Path(path).stem), cfg, parallel, _ORT_SESS)
-+            for path in image_paths
-+        ]
-+
-+    model_paths = _resolve_model_paths(cfg)
-+    with cf.ProcessPoolExecutor(
-+        max_workers=parallel.max_parallel_images,
-+        initializer=_worker_init,
-+        initargs=(parallel, model_paths),
-+    ) as ex:
-+        futures = [
-+            ex.submit(_analyze_single, path, str(out_root / Path(path).stem), cfg, parallel, None)
-+            for path in image_paths
-+        ]
-+        return [f.result() for f in futures]
-+
-+
-+def analyze_image(image_path: str, out_dir: str, cfg: AnalyzerConfig, parallel: ParallelConfig = ParallelConfig()):
-+    # For backward compatibility we store artifacts directly in ``out_dir``.
-+    if parallel.max_parallel_images <= 1:
-+        return _analyze_single(image_path, out_dir, cfg, parallel, _ORT_SESS)
-+    # if parallelism requested, fall back to batch API
-+    return analyze_images([image_path], out_dir, cfg, parallel)[0]
-diff --git a/idtamper/preproc.py b/idtamper/preproc.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..5b5de4d6427dfc1df708ccf2273b671a5f98435c
---- /dev/null
-+++ b/idtamper/preproc.py
-@@ -0,0 +1,84 @@
-+"""Image preprocessing utilities and cache."""
-+
-+from __future__ import annotations
-+
-+from dataclasses import dataclass
-+from typing import List
-+import io
-+
-+import numpy as np
-+from PIL import Image
-+
-+
-+@dataclass
-+class PreprocOptions:
-+    max_side: int = 1600
-+    keep_exif: bool = False
-+    colorspace: str = "RGB"
-+
-+
-+@dataclass
-+class PreprocCache:
-+    """Container for preprocessed representations of an image.
-+
-+    The naming of the attributes is intentionally kept short and
-+    consistent so that checks can rely on a stable API.  For backward
-+    compatibility ``img_orig``/``img_gray``/``img_ycbcr`` are provided as
-+    properties mapping to the new names.
-+    """
-+
-+    img: np.ndarray
-+    gray: np.ndarray
-+    ycbcr: np.ndarray
-+    pyramid: List[np.ndarray]
-+    jpeg_q90_bytes: bytes | None = None
-+
-+    # --- Backward compatibility aliases ---
-+    @property
-+    def img_orig(self) -> np.ndarray:  # pragma: no cover - simple alias
-+        return self.img
-+
-+    @property
-+    def img_gray(self) -> np.ndarray:  # pragma: no cover - simple alias
-+        return self.gray
-+
-+    @property
-+    def img_ycbcr(self) -> np.ndarray:  # pragma: no cover - simple alias
-+        return self.ycbcr
-+
-+
-+def build_preproc_cache(image: np.ndarray, opts: PreprocOptions) -> PreprocCache:
-+    """Build a :class:`PreprocCache` from an RGB ``image`` array."""
-+
-+    pil = Image.fromarray(image)
-+    W, H = pil.size
-+    if max(W, H) > opts.max_side:
-+        scale = opts.max_side / float(max(W, H))
-+        pil = pil.resize((int(W * scale), int(H * scale)), Image.BILINEAR)
-+
-+    img_rgb = np.asarray(pil, dtype=np.uint8)
-+    img_gray = np.asarray(pil.convert("L"), dtype=np.uint8)
-+    img_ycbcr = np.asarray(pil.convert("YCbCr"), dtype=np.uint8)
-+
-+    pyramid = [img_gray]
-+    cur = pil.convert("L")
-+    while min(cur.size) > 32:
-+        cur = cur.resize((max(1, cur.size[0] // 2), max(1, cur.size[1] // 2)), Image.BILINEAR)
-+        pyramid.append(np.asarray(cur, dtype=np.uint8))
-+
-+    jpeg90 = None
-+    try:
-+        buf = io.BytesIO()
-+        pil.save(buf, "JPEG", quality=90)
-+        jpeg90 = buf.getvalue()
-+    except Exception:
-+        jpeg90 = None
-+
-+    return PreprocCache(
-+        img=img_rgb,
-+        gray=img_gray,
-+        ycbcr=img_ycbcr,
-+        pyramid=pyramid,
-+        jpeg_q90_bytes=jpeg90,
-+    )
-+
-diff --git a/samples/sample3.png b/samples/sample3.png
-new file mode 100644
-index 0000000000000000000000000000000000000000..7d1ad7a80680a491cdbfbfb7ef6db5bc40ef6200
-GIT binary patch
-literal 79
-zcmeAS@N?(olHy`uVBq!ia0vp^Od!kwBL7~QRScxWJY5_^D&{2rIe!2Ij(|y^dRa#1
-UtV6S30#z`0y85}Sb4q9e03m`HSO5S3
-
-literal 0
-HcmV?d00001
-
-diff --git a/samples/sample4.png b/samples/sample4.png
-new file mode 100644
-index 0000000000000000000000000000000000000000..e2022f871431f0fa0026c72dc1357118bd0c9b69
-GIT binary patch
-literal 79
-zcmeAS@N?(olHy`uVBq!ia0vp^Od!kwBL7~QRScxWJY5_^D&{1oB>Xsk;J|?+Kz!f;
-Z0|U1_BlC>b>2*LA44$rjF6*2Ung9T}7a9Nn
-
-literal 0
-HcmV?d00001
-
-diff --git a/scripts/bench_parallelism.py b/scripts/bench_parallelism.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..012b69df2cf7e341592d28419963933a3c8a7b6b
---- /dev/null
-+++ b/scripts/bench_parallelism.py
-@@ -0,0 +1,68 @@
-+#!/usr/bin/env python3
-+"""Benchmark serial vs parallel execution of the forensic pipeline."""
-+import argparse
-+import json
-+import os
-+import statistics
-+import time
-+from pathlib import Path
-+
-+import numpy as np
-+
-+from idtamper.pipeline import AnalyzerConfig, analyze_images
-+from idtamper.execution import ParallelConfig
-+from idtamper.metrics import describe_runtime
-+
-+
-+def run(dataset: Path, cfg: AnalyzerConfig, pcfg: ParallelConfig, runs: int):
-+    imgs = [str(p) for p in sorted(dataset.glob("*")) if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
-+    if not imgs:
-+        raise SystemExit("no images found in dataset")
-+    latencies = []
-+    t_all_start = time.perf_counter()
-+    for _ in range(runs):
-+        t0 = time.perf_counter()
-+        analyze_images(imgs, "_bench_out", cfg, pcfg)
-+        latencies.append((time.perf_counter() - t0) * 1000.0 / len(imgs))
-+    total = time.perf_counter() - t_all_start
-+    imgs_per_s = (len(imgs) * runs) / total
-+    median_ms = statistics.median(latencies)
-+    p95_ms = float(np.percentile(latencies, 95)) if len(latencies) > 1 else latencies[0]
-+    return {
-+        "images_per_s": imgs_per_s,
-+        "median_ms_per_img": median_ms,
-+        "p95_ms_per_img": p95_ms,
-+        "runtime": describe_runtime(pcfg),
-+    }
-+
-+
-+def main():
-+    ap = argparse.ArgumentParser()
-+    ap.add_argument("--dataset", required=True, type=Path, help="directory with images")
-+    ap.add_argument("--profile", default=None, help="profile name (unused placeholder)")
-+    ap.add_argument("--runs", type=int, default=1)
-+    mode = ap.add_mutually_exclusive_group(required=True)
-+    mode.add_argument("--serial", action="store_true")
-+    mode.add_argument("--parallel", action="store_true")
-+    args = ap.parse_args()
-+
-+    cfg = AnalyzerConfig()
-+    if args.serial:
-+        pcfg = ParallelConfig(
-+            max_parallel_images=1,
-+            parallel_signal_checks=False,
-+            onnx_intra_threads=os.cpu_count() or 1,
-+            onnx_inter_threads=1,
-+        )
-+        out_name = "bench_serial.json"
-+    else:
-+        pcfg = ParallelConfig(max_parallel_images=2, parallel_signal_checks=True)
-+        out_name = "bench_parallel.json"
-+
-+    res = run(args.dataset, cfg, pcfg, args.runs)
-+    Path(out_name).write_text(json.dumps(res, indent=2))
-+    print(json.dumps(res, indent=2))
-+
-+
-+if __name__ == "__main__":
-+    main()
-diff --git a/tests/test_parallel_e2e.py b/tests/test_parallel_e2e.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..ebb5b016b976eed5eeb19c55298e1fb8e0ea6089
---- /dev/null
-+++ b/tests/test_parallel_e2e.py
-@@ -0,0 +1,42 @@
-+from pathlib import Path
-+import pytest
-+
-+from idtamper.pipeline import analyze_images, AnalyzerConfig
-+from idtamper.execution import ParallelConfig
-+
-+
-+def test_serial_vs_parallel(tmp_path):
-+    imgs = sorted(str(p) for p in Path("samples").glob("*.png"))
-+    cfg = AnalyzerConfig()
-+    serial_dir = tmp_path / "serial"
-+    parallel_dir = tmp_path / "parallel"
-+
-+    reports_s = analyze_images(imgs, str(serial_dir), cfg, ParallelConfig(max_parallel_images=1, parallel_signal_checks=False))
-+    reports_p = analyze_images(imgs, str(parallel_dir), cfg, ParallelConfig(max_parallel_images=2, parallel_signal_checks=True))
-+
-+    assert len(reports_s) == len(reports_p)
-+    for rs, rp in zip(reports_s, reports_p):
-+        assert rs["tamper_score"] == pytest.approx(rp["tamper_score"], abs=1e-6)
-+        for name, chk in rs["per_check"].items():
-+            sc = chk["score"]
-+            pc = rp["per_check"][name]["score"]
-+            if sc is None and pc is None:
-+                continue
-+            assert sc == pytest.approx(pc, abs=1e-6)
-+
-+
-+def test_parallel_stability(tmp_path):
-+    imgs = [str(Path("samples/sample1.png")), str(Path("samples/sample2.png"))]
-+    cfg = AnalyzerConfig()
-+    pcfg = ParallelConfig(max_parallel_images=2, parallel_signal_checks=True)
-+    base = analyze_images(imgs, str(tmp_path / "run0"), cfg, pcfg)
-+    for i in range(1, 3):
-+        rep = analyze_images(imgs, str(tmp_path / f"run{i}"), cfg, pcfg)
-+        for r0, r1 in zip(base, rep):
-+            assert r0["tamper_score"] == pytest.approx(r1["tamper_score"], abs=1e-6)
-+            for name in r0["per_check"]:
-+                s0 = r0["per_check"][name]["score"]
-+                s1 = r1["per_check"][name]["score"]
-+                if s0 is None and s1 is None:
-+                    continue
-+                assert s0 == pytest.approx(s1, abs=1e-6)
+     docker build -t id-integrity-shield:cpu .

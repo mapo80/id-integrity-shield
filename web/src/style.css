@@ -9,3 +9,5 @@ body{background:linear-gradient(180deg,#0b1220 0%,#0f1b33 100%);margin:0;font-fa
 .card{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);backdrop-filter: blur(6px)}
 .drop-hint{color:#c9d4f0}
 code{background:#0d1b2a;padding:2px 6px;border-radius:6px}
+/* Facoltativo: evidenziazione testo nella dropzone */
+.ant-upload-text span { text-decoration: underline; }
