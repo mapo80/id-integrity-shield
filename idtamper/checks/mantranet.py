@@ -1,5 +1,8 @@
 
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 def run(pil_image, params=None):
     """ManTraNet ONNX check (CPU). 
@@ -24,7 +27,9 @@ def run(pil_image, params=None):
         try:
             import onnxruntime as ort
             session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+            logger.info("ManTraNet model loaded from %s", model_path)
         except Exception as e:
+            logger.error("ManTraNet failed to load model %s: %s", model_path, e)
             return {"name":"mantranet","score":None,"map":None,"meta":{"reason":str(e)}}
 
     if session is not None:
@@ -55,8 +60,10 @@ def run(pil_image, params=None):
             k = max(1, int(len(flat)*top_percent/100.0))
             topk = np.partition(flat, -k)[-k:]
             score = float(np.clip(topk.mean(), 0.0, 1.0))
+            logger.info("ManTraNet inference completed: score=%.4f", score)
             return {"name":"mantranet","score":score,"map":hm,"meta":{"input_size":[Ht,Wt],"top_percent":top_percent}}
         except Exception as e:
+            logger.error("ManTraNet inference failed: %s", e)
             return {"name":"mantranet","score":None,"map":None,"meta":{"reason":str(e)}}
     if mock:
         # simple center blob heatmap to exercise the pipeline
@@ -68,5 +75,7 @@ def run(pil_image, params=None):
         flat = hm.flatten()
         k = max(1, int(len(flat)*top_percent/100.0))
         score = float(np.partition(flat, -k)[-k:].mean())
+        logger.info("ManTraNet mock mode: score=%.4f", score)
         return {"name":"mantranet","score":score,"map":hm,"meta":{"mock":True,"top_percent":top_percent}}
+    logger.warning("ManTraNet skipped: no model available and mock disabled")
     return {"name":"mantranet","score":None,"map":None,"meta":{"reason":"no model and no mock"}}
