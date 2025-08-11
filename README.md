@@ -273,6 +273,16 @@ docker run --rm -p 8000:8000   -e API_KEY=mysecret   -v $PWD/data:/data   id-int
 
 ---
 
+## IDNet (GRC) dataset evaluation
+
+- Downloaded `GRC.zip` from [Zenodo](https://zenodo.org/records/13854938).
+- Extracted a random ~50 MB subset (121 genuine, 120 tampered images) into `data/idnet_sample`.
+- Running `scripts/scan_dataset.py` with `recapture-id` profile and real ONNX models requires substantial CPU time; full processing of the subset exceeded the resources available in this environment.
+- To reproduce on a more powerful host, ensure `models/noiseprint_pp.onnx` and `models/mantranet_256x256.onnx` exist and run:
+  ```bash
+  python scripts/scan_dataset.py --input data/idnet_sample --out runs/idnet --profile recapture-id --params params.json
+  ```
+
 ## Testing & Coverage
 
 ```bash
