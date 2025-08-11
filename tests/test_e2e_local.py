@@ -68,7 +68,7 @@ def test_api_analyze_end2end():
     }
 
     files = {"file": (sample.name, io.BytesIO(data), "image/jpeg")}
-    form = {"profile": "recapture-id", "params": json.dumps(params)}
+    form = {"profile": "recapture-id@2", "params": json.dumps(params)}
     resp = client.post("/v1/analyze", files=files, data=form)
     assert resp.status_code == 200, resp.text
     body = resp.json()
